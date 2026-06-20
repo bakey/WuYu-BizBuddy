@@ -28,7 +28,10 @@ class LLMService:
         self.model = settings.openai_chat_model
 
     def _build_messages(
-        self, prompt: str, context: str
+        self,
+        prompt: str,
+        context: str,
+        system_prompt: str | None = None,
     ) -> list[ChatCompletionMessageParam]:
         """构造对话消息.
 
@@ -45,11 +48,16 @@ class LLMService:
             "请根据参考资料回答问题。"
         )
         return [
-            {"role": "system", "content": self.SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt or self.SYSTEM_PROMPT},
             {"role": "user", "content": content},
         ]
 
-    async def chat(self, prompt: str, context: str) -> str:
+    async def chat(
+        self,
+        prompt: str,
+        context: str,
+        system_prompt: str | None = None,
+    ) -> str:
         """非流式对话.
 
         Args:
@@ -65,7 +73,7 @@ class LLMService:
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
-                messages=self._build_messages(prompt, context),
+                messages=self._build_messages(prompt, context, system_prompt),
                 temperature=0.3,
             )
             return response.choices[0].message.content or ""

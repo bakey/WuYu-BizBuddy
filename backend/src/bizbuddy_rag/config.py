@@ -25,5 +25,10 @@ class Settings(BaseSettings):
     rag_top_k: int = 5
     rag_similarity_threshold: float = 0.7
 
+    industry_default_top_k: int = 5
+    industry_max_top_k: int = 20
+    industry_fulltext_config: str = "chinese_zh"
+    industry_default_max_context_chars: int = 6000
+
 
 settings = Settings()
