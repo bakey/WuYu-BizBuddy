@@ -8,6 +8,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from bizbuddy_rag import __version__
+from bizbuddy_rag.api.industry_knowledge_routes import (
+    router as industry_knowledge_router,
+)
 from bizbuddy_rag.db import SessionLocal, init_db
 from bizbuddy_rag.db.repository import DocumentRepository
 from bizbuddy_rag.models import (
@@ -23,6 +26,7 @@ from bizbuddy_rag.services import EmbeddingService, LLMService, RAGService
 from bizbuddy_rag.utils.exceptions import RAGException
 
 router = APIRouter()
+router.include_router(industry_knowledge_router)
 
 
 @asynccontextmanager
