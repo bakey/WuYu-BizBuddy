@@ -1,13 +1,37 @@
 <script setup>
 import { useToast } from '@/composables/useToast'
-const { toast } = useToast()
+import { useCitationPreview } from '@/composables/useCitationPreview'
+import { useChatInput } from '@/composables/useChatInput'
+import { downloadText, stripHtml, copyText } from '@/utils/file'
 
-defineProps({
+const { toast } = useToast()
+const { openPreview } = useCitationPreview()
+const { focusInput } = useChatInput()
+
+const props = defineProps({
   message: { type: Object, required: true }
 })
 
-function onAction(label) {
-  toast(`操作：${label}`, 'info')
+function onCite(c) {
+  if (c.content) openPreview(c)
+  else toast('该引用暂无可预览内容', 'warn')
+}
+
+async function onAction(label) {
+  const text = stripHtml(props.message.content || '')
+  if (label === '复制') {
+    const ok = await copyText(text)
+    toast(ok ? '已复制到剪贴板' : '复制失败', ok ? 'ok' : 'err')
+  } else if (label === '导出') {
+    const stamp = (props.message.time || '').replace(':', '') || 'export'
+    downloadText(`回答-${stamp}.md`, text, 'text/markdown')
+    toast('已导出回答（.md）', 'ok')
+  } else if (label === '追问') {
+    focusInput()
+    toast('请在下方输入追问内容', 'info')
+  } else {
+    toast(`操作：${label}`, 'info')
+  }
 }
 </script>
 
@@ -42,7 +66,8 @@ function onAction(label) {
           v-for="c in message.citations"
           :key="c.num"
           class="cite"
-          @click="toast(`查看引用 ${c.num}`, 'info')"
+          :title="c.content ? '点击预览引用原文' : ''"
+          @click="onCite(c)"
         >
           <span class="cite-num">{{ c.num }}</span>{{ c.label }}
         </div>

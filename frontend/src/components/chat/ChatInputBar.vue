@@ -1,9 +1,16 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useChatStore } from '@/stores/chat'
+import { useChatInput } from '@/composables/useChatInput'
 
 const chat = useChatStore()
 const inputText = ref('')
+const inputEl = ref(null)
+const { registerFocus } = useChatInput()
+
+onMounted(() => {
+  registerFocus(() => inputEl.value?.focus())
+})
 
 function doSend() {
   const txt = inputText.value.trim()
@@ -42,6 +49,7 @@ function onKeydown(e) {
         <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
       </svg>
       <input
+        ref="inputEl"
         type="text"
         v-model="inputText"
         placeholder="继续对话，或输入新问题..."
