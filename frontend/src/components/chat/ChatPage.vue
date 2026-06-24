@@ -2,6 +2,7 @@
 import ChatSidebar from './ChatSidebar.vue'
 import ChatPanel from './ChatPanel.vue'
 import ChatRightPanel from './ChatRightPanel.vue'
+import CitationPreviewModal from './CitationPreviewModal.vue'
 </script>
 
 <template>
@@ -13,6 +14,7 @@ import ChatRightPanel from './ChatRightPanel.vue'
         <ChatRightPanel />
       </div>
     </div>
+    <CitationPreviewModal />
   </div>
 </template>
 

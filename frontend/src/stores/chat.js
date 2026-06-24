@@ -36,54 +36,10 @@ export const useChatStore = defineStore('chat', () => {
     {
       id: 1, role: 'ai', sender: '政策解析专家', time: '14:30',
       content: '您好！我是<strong>政策解析专家</strong>，我自带 <strong>政策检索</strong>、<strong>条文比对</strong>、<strong>影响评估</strong>、<strong>合规清单</strong> 4 个技能。请描述您要研究的政策问题。'
-    },
-    {
-      id: 2, role: 'user', time: '14:32',
-      content: '帮我对比 2025 沪苏浙皖四地无废城市建设的政策差异，重点关注危废处置和资源化利用方面的扶持力度。'
-    },
-    {
-      id: 3, role: 'ai', sender: '政策解析专家', time: '14:32',
-      skillCall: '调用技能：政策检索 · 已检索 4 省 23 份文件',
-      content: `<div style="font-weight:700;color:var(--ink);font-size:14px;margin-bottom:8px">2025 沪苏浙皖无废城市政策对比要点</div>
-        <p style="margin-bottom:10px">综合分析最新政策文件后，四地在<strong>危废处置和资源化利用</strong>方面的扶持力度差异如下：</p>
-        <ul style="padding-left:22px;line-height:1.85">
-          <li><strong>上海</strong>：以单位 GDP 危废产生量考核，对电子废物拆解资质企业给予税收优惠</li>
-          <li><strong>江苏</strong>：发布《无废园区建设导则》，省级专项资金 ¥3.2 亿支持 21 个园区试点</li>
-          <li><strong>浙江</strong>：探索危废"点对点"利用试点，简化跨区转运审批</li>
-          <li><strong>安徽</strong>：在合肥、芜湖建设区域危废协同处置中心</li>
-        </ul>
-        <p style="color:var(--ink3);font-size:12.5px;margin-top:10px">总体看，江苏在专项资金体量上领先，浙江在制度创新和审批优化上更激进。</p>`,
-      citations: [
-        { num: 1, label: '上海无废城市建设方案' },
-        { num: 2, label: '江苏无废园区建设导则' },
-        { num: 3, label: '浙江"点对点"利用通知' },
-        { num: 4, label: '安徽危废协同处置规划' }
-      ],
-      actions: [
-        { label: '生成对比矩阵', variant: 'green' },
-        { label: '影响评估' },
-        { label: '复制' }
-      ]
-    },
-    {
-      id: 4, role: 'user', time: '14:35',
-      content: '生成横向对比矩阵，加上具体的资金额度。'
-    },
-    {
-      id: 5, role: 'ai', sender: '政策解析专家', time: '14:35',
-      thinking: '调用技能：条文比对 → 影响评估 · 正在生成对比矩阵...'
     }
   ])
 
-  const citations = ref([
-    { id: 1, title: '上海无废城市建设方案 (2024-2026)', meta: '[1] 政策法规库 · 95%', relevance: 'high' },
-    { id: 2, title: '江苏无废园区建设导则',              meta: '[2] 政策法规库 · 92%', relevance: 'high' },
-    { id: 3, title: '浙江危废"点对点"利用通知',         meta: '[3] 政策法规库 · 88%', relevance: 'high' },
-    { id: 4, title: '安徽危废协同处置规划',              meta: '[4] 政策法规库 · 86%', relevance: 'high' },
-    { id: 5, title: '国家无废城市试点中期评估报告',       meta: '[5] 学术论文 · 72%',   relevance: 'mid' },
-    { id: 6, title: '长三角危废协同处置研究',            meta: '[6] 学术论文 · 68%',   relevance: 'mid' },
-    { id: 7, title: '"无废园区"创建指南',               meta: '[7] 政策法规库 · 64%', relevance: 'mid' }
-  ])
+  const citations = ref([])
 
   let _nextId = messages.value.length + 1
 
@@ -144,12 +100,21 @@ export const useChatStore = defineStore('chat', () => {
             const data = JSON.parse(raw)
 
             if (eventType === 'references') {
-              msgRefs = data.map((r, i) => ({ num: i + 1, label: r.source || `引用 ${i + 1}` }))
+              msgRefs = data.map((r, i) => ({
+                num: i + 1,
+                label: r.source || `引用 ${i + 1}`,
+                source: r.source || `引用 ${i + 1}`,
+                content: r.content || '',
+                score: r.score
+              }))
               citations.value = data.map((r, i) => ({
                 id: i + 1,
                 title: r.source || `文档片段 ${i + 1}`,
                 meta: `[${i + 1}] 相似度 ${(r.score * 100).toFixed(0)}%`,
-                relevance: r.score >= 0.85 ? 'high' : 'mid'
+                relevance: r.score >= 0.85 ? 'high' : 'mid',
+                source: r.source || `文档片段 ${i + 1}`,
+                content: r.content || '',
+                score: r.score
               }))
             } else if (eventType === 'delta') {
               accText += data.delta
