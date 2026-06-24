@@ -78,7 +78,15 @@ async def create_document(
         source=payload.source,
         metadata=payload.metadata,
     )
-    return DocumentOut.model_validate(doc)
+    # 不能用 DocumentOut.model_validate(doc)：SQLAlchemy 把 ``metadata`` 占用为
+    # 表元数据注册表，ORM 列的真实属性名是 ``metadata_``，直接 validate 会取到
+    # MetaData() 对象导致校验失败。这里显式构造。
+    return DocumentOut(
+        id=doc.id,
+        content=doc.content,
+        source=doc.source,
+        metadata=doc.metadata_,
+    )
 
 
 @router.get("/documents", response_model=list[DocumentOut])
@@ -90,7 +98,15 @@ async def list_documents(
     """列出文档."""
     repo = DocumentRepository(db)
     docs = repo.list_all(limit=limit, offset=offset)
-    return [DocumentOut.model_validate(doc) for doc in docs]
+    return [
+        DocumentOut(
+            id=doc.id,
+            content=doc.content,
+            source=doc.source,
+            metadata=doc.metadata_,
+        )
+        for doc in docs
+    ]
 
 
 @router.delete("/documents/{doc_id}")

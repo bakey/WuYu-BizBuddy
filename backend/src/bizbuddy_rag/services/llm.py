@@ -103,6 +103,9 @@ class LLMService:
                 stream=True,
             )
             async for chunk in stream:
+                # 部分 OpenAI 兼容网关会发空 choices 的 chunk（如末尾 usage 块），需跳过
+                if not chunk.choices:
+                    continue
                 delta = chunk.choices[0].delta.content
                 if delta:
                     yield delta
