@@ -12,6 +12,7 @@ dependencies = [
     "psycopg2-binary",
     "pydantic-settings",
     "python-dotenv",
+    "sentence-transformers",
     "sqlalchemy",
     "uvicorn",
 ]

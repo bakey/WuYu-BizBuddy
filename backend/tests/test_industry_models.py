@@ -33,7 +33,7 @@ def test_retrieve_request_rejects_empty_query() -> None:
 def test_retrieve_response_wraps_references_and_debug() -> None:
     """Retrieve responses carry evidence chunks and debug metadata."""
     reference = IndustryKnowledgeReference(
-        segment_id=uuid4(),
+        segment_id=str(uuid4()),
         document_id=uuid4(),
         dataset_id=uuid4(),
         chunk_index=1,
@@ -47,6 +47,22 @@ def test_retrieve_response_wraps_references_and_debug() -> None:
     )
     assert response.items[0].score == 0.37
     assert response.debug["retrieval_mode"] == "fulltext"
+
+
+def test_reference_accepts_vector_source_without_uuid_ids() -> None:
+    """Vector-mode references use a text segment_id and have no uuid doc/dataset."""
+    reference = IndustryKnowledgeReference(
+        segment_id="d41d8cd98f00b204e9800998ecf8427e",
+        chunk_index=2,
+        content="生活垃圾焚烧设施运行单位应当建立运行台账。",
+        score=0.82,
+        source="/data/html_md/xxx.md",
+        subdir="html_md",
+        metadata={"n_chunks": 10},
+    )
+    assert reference.document_id is None
+    assert reference.dataset_id is None
+    assert reference.subdir == "html_md"
 
 
 def test_feedback_rating_range() -> None:
