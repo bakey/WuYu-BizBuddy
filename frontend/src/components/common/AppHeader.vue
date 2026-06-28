@@ -1,7 +1,12 @@
 <script setup>
+import { computed } from 'vue'
 import { useAppStore } from '@/stores/app'
 
 const appStore = useAppStore()
+
+const beLabel = computed(() => ({
+  checking: '检测中', online: '后端在线', offline: '后端离线'
+}[appStore.backendStatus] || ''))
 
 const TABS = [
   { key: 'chat',  label: '智能问答', badge: null },
@@ -40,6 +45,9 @@ const TABS = [
 
     <!-- Right actions -->
     <div class="header-right">
+      <span class="be-status" :class="appStore.backendStatus" :title="`后端 /api/v1/health：${beLabel}`">
+        <span class="be-dot"></span>{{ beLabel }}
+      </span>
       <button class="icon-btn" title="搜索">
         <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round">
           <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
@@ -61,3 +69,18 @@ const TABS = [
     </div>
   </header>
 </template>
+
+<style scoped>
+.be-status {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 0 10px; height: 28px; border-radius: 14px;
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+  border: 1px solid var(--line); background: var(--surface2); color: var(--ink3);
+}
+.be-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
+.be-status.online  { background: var(--primary-light); border-color: var(--primary-border); color: var(--primary); }
+.be-status.online .be-dot  { background: var(--primary); box-shadow: 0 0 5px rgba(16,185,129,.6); }
+.be-status.offline { background: var(--danger-light); border-color: #FCA5A5; color: var(--danger); }
+.be-status.offline .be-dot { background: var(--danger); }
+.be-status.checking .be-dot { background: var(--warn); }
+</style>
