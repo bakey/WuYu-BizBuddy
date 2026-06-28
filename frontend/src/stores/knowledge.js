@@ -214,6 +214,37 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
     }
   }
 
+  // ── 检索测试（POST /api/v1/retrieve，纯向量检索、不调 LLM）──
+  const retrieveQuery   = ref('')
+  const retrieveTopK    = ref(5)
+  const retrieveResults = ref([])
+  const retrieveLoading = ref(false)
+  const retrieveError   = ref('')
+  const retrieveDone    = ref(false)   // 已执行过一次，用于区分「未检索」与「无结果」
+
+  async function runRetrieve() {
+    const q = retrieveQuery.value.trim()
+    if (!q || retrieveLoading.value) return
+    retrieveLoading.value = true
+    retrieveError.value = ''
+    try {
+      const resp = await fetch('/api/v1/retrieve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: q, top_k: retrieveTopK.value })
+      })
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      const items = await resp.json()
+      retrieveResults.value = Array.isArray(items) ? items : []
+    } catch (err) {
+      retrieveError.value = err.message || '检索失败'
+      retrieveResults.value = []
+    } finally {
+      retrieveDone.value = true
+      retrieveLoading.value = false
+    }
+  }
+
   function setGroup(name) {
     groups.value.forEach(g => { g.active = g.name === name })
   }
@@ -224,5 +255,9 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
 
   loadDatasets()
 
-  return { kpis, datasets, groups, indexStatuses, visibility, addDataset, removeDataset, setGroup, setVisibility }
+  return {
+    kpis, datasets, groups, indexStatuses, visibility,
+    addDataset, removeDataset, setGroup, setVisibility,
+    retrieveQuery, retrieveTopK, retrieveResults, retrieveLoading, retrieveError, retrieveDone, runRetrieve
+  }
 })
