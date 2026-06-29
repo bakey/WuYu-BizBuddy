@@ -2,6 +2,7 @@
 import KnowledgeSidebar from './KnowledgeSidebar.vue'
 import UploadZone       from './UploadZone.vue'
 import DatasetTable     from './DatasetTable.vue'
+import RetrievePanel    from './RetrievePanel.vue'
 import { useKnowledgeStore } from '@/stores/knowledge'
 
 const store = useKnowledgeStore()
@@ -39,6 +40,7 @@ const store = useKnowledgeStore()
 
       <UploadZone />
       <DatasetTable />
+      <RetrievePanel />
     </div>
   </div>
 </template>
