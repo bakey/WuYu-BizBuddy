@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, reactive } from 'vue'
+import { onMounted, ref, reactive } from 'vue'
 
 const STREAM_RESPONSES = [
   '已检索 3 个数据库，找到 12 篇高相关政策文件。让我逐一对比关键条款...',
@@ -24,13 +24,8 @@ export const useChatStore = defineStore('chat', () => {
     { id: 4, name: '知识图谱',   count: '280万',  checked: false }
   ])
 
-  const taskHistory = ref([
-    { id: 1, title: '2025 长三角无废城市政策对比分析', meta: '📜 政策解析 · 进行中',   pin: 'rd', pinned: true,  active: true  },
-    { id: 2, title: '锂电池回收技术对标',               meta: '📊 企业对标 · 5天前',    pin: 'rd', pinned: true,  active: false },
-    { id: 3, title: '知识图谱构建',                     meta: '🕸️ 图谱探索 · 7天前',   pin: 'gr', pinned: true,  active: false },
-    { id: 4, title: '焚烧工艺数据采集与分析',           meta: '🏭 工艺指导 · 3天前',    pin: '',   pinned: false, active: false },
-    { id: 5, title: '长三角遥感图像非法堆放识别',       meta: '🛰️ 遥感（V2）· 7天前',  pin: '',   pinned: false, active: false }
-  ])
+  const taskHistory = ref([])
+  const loadingTasks = ref(false)
 
   const messages = ref([
     {
@@ -43,8 +38,91 @@ export const useChatStore = defineStore('chat', () => {
 
   let _nextId = messages.value.length + 1
 
+  async function api(path, options = {}) {
+    const resp = await fetch(`/api/v1${path}`, {
+      headers: { 'Content-Type': 'application/json', ...options.headers },
+      ...options
+    })
+    if (!resp.ok) {
+      const text = await resp.text()
+      throw new Error(`HTTP ${resp.status}: ${text}`)
+    }
+    return resp.status === 204 ? null : resp.json()
+  }
+
+  function _mapTask(t) {
+    return {
+      id: t.id,
+      title: t.title,
+      meta: t.meta || `${currentAgent.name} · 刚刚`,
+      pin: t.pin || '',
+      pinned: t.pinned,
+      active: t.active,
+      agentName: t.agent_name,
+      agentIcon: t.agent_icon
+    }
+  }
+
+  async function loadTasks() {
+    loadingTasks.value = true
+    try {
+      const items = await api('/chat/tasks')
+      taskHistory.value = items.map(_mapTask)
+    } catch (err) {
+      console.error('加载任务历史失败', err)
+    } finally {
+      loadingTasks.value = false
+    }
+  }
+
+  async function createTask(title = '新对话', options = {}) {
+    const payload = {
+      title,
+      meta: options.meta || `${currentAgent.name} · 刚刚`,
+      pinned: options.pinned || false,
+      agent_name: currentAgent.name,
+      agent_icon: currentAgent.icon
+    }
+    const t = await api('/chat/tasks', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    })
+    const mapped = _mapTask(t)
+    taskHistory.value.unshift(mapped)
+    await activateTask(mapped.id)
+    return mapped
+  }
+
+  async function activateTask(id) {
+    const t = await api(`/chat/tasks/${id}/activate`, { method: 'POST' })
+    const updated = _mapTask(t)
+    taskHistory.value = taskHistory.value.map(item =>
+      item.id === updated.id ? updated : { ...item, active: false }
+    )
+    return updated
+  }
+
+  async function togglePinTask(id) {
+    const t = await api(`/chat/tasks/${id}/pin`, { method: 'POST' })
+    const updated = _mapTask(t)
+    const idx = taskHistory.value.findIndex(item => item.id === updated.id)
+    if (idx > -1) {
+      taskHistory.value[idx] = updated
+    }
+    await loadTasks()
+    return updated
+  }
+
+  async function deleteTask(id) {
+    await api(`/chat/tasks/${id}`, { method: 'DELETE' })
+    taskHistory.value = taskHistory.value.filter(item => item.id !== id)
+  }
+
   function setActiveTask(id) {
-    taskHistory.value.forEach(t => { t.active = t.id === id })
+    const found = taskHistory.value.find(t => t.id === id)
+    if (found && !found.active) {
+      activateTask(id)
+    }
   }
 
   function toggleDataSource(id) {
@@ -77,8 +155,6 @@ export const useChatStore = defineStore('chat', () => {
       let accText = ''
       let msgRefs = []
       let started = false
-      // eventType 必须跨 read() 持续：一个 SSE 事件的 `event:` 与 `data:`
-      // 两行可能被网络分片拆到相邻 chunk，若每次 read 重置会丢事件类型导致丢字
       let eventType = ''
 
       while (true) {
@@ -141,8 +217,6 @@ export const useChatStore = defineStore('chat', () => {
       const idx = messages.value.findIndex(m => m.id === thinkId)
       if (idx > -1) {
         if (!started) {
-          // 流正常结束但一个 delta 都没收到（空回答）——替换掉 thinking 占位，
-          // 否则气泡会永远卡在「正在检索…」
           messages.value[idx] = {
             id: thinkId, role: 'ai', sender: currentAgent.name,
             time: new Date().toTimeString().slice(0, 5),
@@ -173,8 +247,13 @@ export const useChatStore = defineStore('chat', () => {
     Object.assign(currentAgent, agent)
   }
 
+  onMounted(() => {
+    loadTasks()
+  })
+
   return {
-    currentAgent, dataSources, taskHistory, messages, citations,
+    currentAgent, dataSources, taskHistory, messages, citations, loadingTasks,
+    loadTasks, createTask, activateTask, togglePinTask, deleteTask,
     setActiveTask, toggleDataSource, sendMessage, setCurrentAgent
   }
 })

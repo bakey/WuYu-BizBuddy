@@ -78,7 +78,12 @@ async def create_document(
         source=payload.source,
         metadata=payload.metadata,
     )
-    return DocumentOut.model_validate(doc)
+    return DocumentOut(
+        id=doc.id,
+        content=doc.content,
+        source=doc.source,
+        metadata=doc.metadata_,
+    )
 
 
 @router.get("/documents", response_model=list[DocumentOut])
@@ -90,7 +95,15 @@ async def list_documents(
     """列出文档."""
     repo = DocumentRepository(db)
     docs = repo.list_all(limit=limit, offset=offset)
-    return [DocumentOut.model_validate(doc) for doc in docs]
+    return [
+        DocumentOut(
+            id=doc.id,
+            content=doc.content,
+            source=doc.source,
+            metadata=doc.metadata_,
+        )
+        for doc in docs
+    ]
 
 
 @router.delete("/documents/{doc_id}")

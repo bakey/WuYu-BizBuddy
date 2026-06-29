@@ -10,7 +10,7 @@ from bizbuddy_rag.utils.exceptions import LLMError
 
 
 class LLMService:
-    """基于 OpenAI 协议的大模型服务."""
+    """基于 OpenAI 协议的大模型服务；mock_ai=true 时返回 mock 回答."""
 
     SYSTEM_PROMPT = (
         "你是一个有帮助的助手。请严格根据以下参考资料回答用户问题，"
@@ -18,13 +18,16 @@ class LLMService:
     )
 
     def __init__(self) -> None:
-        """初始化异步 OpenAI 客户端."""
-        if not settings.openai_api_key:
+        """初始化异步 OpenAI 客户端或 mock 模式."""
+        self.mock = settings.mock_ai
+        if not self.mock and not settings.openai_api_key:
             raise LLMError("OPENAI_API_KEY 未配置")
-        self.client = AsyncOpenAI(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url or None,
-        )
+        self.client = None
+        if not self.mock:
+            self.client = AsyncOpenAI(
+                api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url or None,
+            )
         self.model = settings.openai_chat_model
 
     def _build_messages(
@@ -52,6 +55,16 @@ class LLMService:
             {"role": "user", "content": content},
         ]
 
+    def _mock_answer(self, prompt: str, context: str) -> str:
+        """生成本地调试用的 mock 回答."""
+        context_summary = context[:200].replace("\n", " ") if context else "（无上下文）"
+        return (
+            "【本地 Mock 回答】\n"
+            f"用户问题：{prompt}\n"
+            f"参考资料摘要：{context_summary}...\n\n"
+            "这是 mock 模式返回的固定格式回答，用于无 OpenAI API Key 时的本地调试。"
+        )
+
     async def chat(
         self,
         prompt: str,
@@ -70,6 +83,8 @@ class LLMService:
         Raises:
             LLMError: 调用失败.
         """
+        if self.mock:
+            return self._mock_answer(prompt, context)
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -95,6 +110,13 @@ class LLMService:
         Raises:
             LLMError: 调用失败.
         """
+        if self.mock:
+            answer = self._mock_answer(prompt, context)
+            # 按词/短句切片，模拟流式输出。
+            chunk_size = 8
+            for i in range(0, len(answer), chunk_size):
+                yield answer[i : i + chunk_size]
+            return
         try:
             stream = await self.client.chat.completions.create(
                 model=self.model,

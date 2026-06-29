@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-small"
     openai_chat_model: str = "gpt-4o-mini"
 
+    # 本地调试开关：开启后使用 mock embedding / mock llm，无需 OpenAI API Key
+    mock_ai: bool = False
+
     rag_top_k: int = 5
     rag_similarity_threshold: float = 0.7
 

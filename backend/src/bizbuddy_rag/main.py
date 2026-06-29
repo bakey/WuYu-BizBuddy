@@ -2,6 +2,8 @@
 
 from fastapi import FastAPI
 
+from bizbuddy_rag.api.agent_routes import router as agent_router
+from bizbuddy_rag.api.chat_routes import router as chat_router
 from bizbuddy_rag.api.routes import lifespan, router
 
 
@@ -14,6 +16,8 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(router, prefix="/api/v1")
+    app.include_router(chat_router, prefix="/api/v1")
+    app.include_router(agent_router, prefix="/api/v1")
     return app
 
 
