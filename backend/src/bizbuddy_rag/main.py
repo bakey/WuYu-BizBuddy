@@ -14,6 +14,7 @@ def create_app() -> FastAPI:
         description="基于 FastAPI + PostgreSQL(pgvector) 的 RAG 后台服务",
         version="0.1.0",
         lifespan=lifespan,
+        redirect_slashes=False,
     )
     app.include_router(router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")

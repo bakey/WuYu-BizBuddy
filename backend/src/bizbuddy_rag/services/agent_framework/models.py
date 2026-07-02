@@ -54,6 +54,9 @@ class PlanStep:
     result: SkillResult | None = None
     status: str = "pending"  # pending / running / completed / failed
     review_feedback: str | None = None
+    started_at: float | None = None
+    completed_at: float | None = None
+    elapsed_ms: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为字典."""
@@ -67,6 +70,9 @@ class PlanStep:
             "result": self.result.to_dict() if self.result else None,
             "status": self.status,
             "review_feedback": self.review_feedback,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "elapsed_ms": self.elapsed_ms,
         }
 
 

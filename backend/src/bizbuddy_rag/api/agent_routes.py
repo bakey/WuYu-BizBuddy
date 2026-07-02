@@ -30,6 +30,7 @@ from bizbuddy_rag.models import (
 )
 from bizbuddy_rag.services import EmbeddingService, LLMService
 from bizbuddy_rag.services.agent_framework import AgentExecutor
+from bizbuddy_rag.services.agent_framework.formatter import ReportFormatter
 from bizbuddy_rag.services.bge_embedding import BgeM3EmbeddingService
 from bizbuddy_rag.services.industry_knowledge import IndustryKnowledgeQueryService
 from bizbuddy_rag.services.rag import RAGService
@@ -413,6 +414,11 @@ async def agent_query(
         raise HTTPException(status_code=404, detail="Agent 不存在")
 
     try:
+        if agent.retrieval_mode == "formatter":
+            formatter = ReportFormatter()
+            formatted = await formatter.format(payload.prompt)
+            return RAGResponse(answer=formatted, references=[])
+
         if agent.retrieval_mode == "industry_knowledge":
             if not agent.industry_skill_id:
                 raise RAGException("该 Agent 未配置行业知识 skill")
@@ -457,6 +463,17 @@ async def _stream_agent_answer(
     import json
 
     try:
+        if agent.retrieval_mode == "formatter":
+            formatter = ReportFormatter()
+            formatted = await formatter.format(payload.prompt)
+            chunk_size = 12
+            for i in range(0, len(formatted), chunk_size):
+                chunk = formatted[i : i + chunk_size]
+                payload = json.dumps({"delta": chunk}, ensure_ascii=False)
+                yield f"event: delta\ndata: {payload}\n\n"
+            yield "event: done\ndata: [DONE]\n\n"
+            return
+
         if agent.retrieval_mode == "industry_knowledge":
             if not agent.industry_skill_id:
                 raise RAGException("该 Agent 未配置行业知识 skill")

@@ -215,7 +215,7 @@ export const useChatStore = defineStore('chat', () => {
     const thinkId = _nextId++
     messages.value.push({
       id: thinkId, role: 'ai', sender: currentAgent.name,
-      time: now, thinking: '正在检索相关资料…'
+      time: now, thinking: '正在生成执行计划…'
     })
 
     try {
@@ -284,10 +284,12 @@ export const useChatStore = defineStore('chat', () => {
               if (idx > -1) {
                 if (!started) {
                   started = true
+                  const prev = messages.value[idx]
                   messages.value[idx] = {
                     id: thinkId, role: 'ai', sender: currentAgent.name,
                     time: new Date().toTimeString().slice(0, 5),
-                    content: accText, citations: [], actions: [], trace
+                    content: accText, citations: [], actions: [], trace,
+                    _showTrace: prev._showTrace ?? true
                   }
                 } else {
                   messages.value[idx].content = accText
@@ -295,17 +297,41 @@ export const useChatStore = defineStore('chat', () => {
               }
             } else if (eventType === 'plan' && trace) {
               trace.plan = data
+              // 预初始化所有步骤，便于立即展示完整计划
+              trace.steps = (data.steps || []).map(s => ({
+                step_number: s.step_number,
+                role: s.role || 'worker',
+                action: s.action,
+                reason: s.reason,
+                input: s.input || {},
+                status: 'pending',
+                summary: '',
+                elapsed_ms: null
+              }))
               const idx = messages.value.findIndex(m => m.id === thinkId)
-              if (idx > -1) messages.value[idx].thinking = '正在制定执行计划…'
+              if (idx > -1) {
+                // 立即把 trace 挂到消息上并默认展开，让 Plan 先输出、再执行
+                messages.value[idx] = {
+                  ...messages.value[idx],
+                  thinking: `已生成执行计划，共 ${(data.steps || []).length} 步`,
+                  trace,
+                  _showTrace: true
+                }
+              }
             } else if (eventType === 'step_start' && trace) {
-              trace.steps.push({ ...data, status: 'running', summary: '' })
+              const step = trace.steps.find(s => s.step_number === data.step_number)
+              if (step) {
+                Object.assign(step, { ...data, status: 'running' })
+              } else {
+                trace.steps.push({ ...data, status: 'running', summary: '' })
+              }
               const idx = messages.value.findIndex(m => m.id === thinkId)
-              if (idx > -1) messages.value[idx].thinking = `正在执行：${data.action}…`
+              if (idx > -1) messages.value[idx].thinking = `正在执行第 ${data.step_number} 步：${data.action}…`
             } else if (eventType === 'step_complete' && trace) {
               const step = trace.steps.find(s => s.step_number === data.step_number)
               if (step) Object.assign(step, data)
               const idx = messages.value.findIndex(m => m.id === thinkId)
-              if (idx > -1) messages.value[idx].thinking = `步骤 ${data.step_number} 完成`
+              if (idx > -1) messages.value[idx].thinking = `第 ${data.step_number} 步完成`
             } else if (eventType === 'review' && trace) {
               trace.reviews.push(data)
             } else if (eventType === 'revision' && trace) {
@@ -322,11 +348,13 @@ export const useChatStore = defineStore('chat', () => {
       const idx = messages.value.findIndex(m => m.id === thinkId)
       if (idx > -1) {
         if (!started) {
+          const prev = messages.value[idx]
           messages.value[idx] = {
             id: thinkId, role: 'ai', sender: currentAgent.name,
             time: new Date().toTimeString().slice(0, 5),
             content: accText || '（本次未生成回答）',
-            citations: msgRefs, actions: [], trace
+            citations: msgRefs, actions: [], trace,
+            _showTrace: prev._showTrace ?? true
           }
         } else {
           messages.value[idx].citations = msgRefs

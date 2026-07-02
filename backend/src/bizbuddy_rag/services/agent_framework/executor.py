@@ -1,11 +1,13 @@
 """Agent 执行引擎."""
 
+import time
 from collections.abc import AsyncGenerator
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from bizbuddy_rag.config import settings
 from bizbuddy_rag.db.execution_repository import ExecutionRepository
 from bizbuddy_rag.db.repository import AgentRepository
 from bizbuddy_rag.services.agent_framework.agents import (
@@ -13,16 +15,17 @@ from bizbuddy_rag.services.agent_framework.agents import (
     ReviewerAgent,
     WorkerAgent,
 )
+from bizbuddy_rag.services.agent_framework.formatter import ReportFormatter
 from bizbuddy_rag.services.agent_framework.models import (
     AgentPlan,
     ExecutionResult,
+    PlanStep,
     ReviewResult,
     SkillResult,
 )
+from bizbuddy_rag.services.agent_framework.skill_registry import SkillRegistry
 from bizbuddy_rag.services.llm import LLMService
 from bizbuddy_rag.utils.exceptions import RAGException
-
-MAX_REVISIONS = 2
 
 
 class AgentExecutor:
@@ -37,6 +40,7 @@ class AgentExecutor:
         vector_db: Session | None,
         agent_repo: AgentRepository,
         execution_id: UUID | None = None,
+        use_function_calling: bool = True,
     ) -> None:
         self.db = db
         self.vector_db = vector_db
@@ -44,6 +48,12 @@ class AgentExecutor:
         self.execution_id = execution_id
         self.exec_repo = ExecutionRepository(db)
         self.llm = LLMService()
+        self.use_function_calling = use_function_calling
+        self.max_revisions = max(0, settings.agent_max_revisions)
+        self.format_output = settings.agent_format_output
+        self.formatter = ReportFormatter() if self.format_output else None
+        # 加载数据库中定义的动态 Skill（OpenAI function 等）
+        SkillRegistry.load_from_db(db)
 
     async def run(
         self,
@@ -141,15 +151,27 @@ class AgentExecutor:
                 user_query=user_query,
             )
 
-        while revision_count <= MAX_REVISIONS:
+        tools = SkillRegistry.as_openai_tools()
+
+        while revision_count <= self.max_revisions:
             previous_feedback = reviews[-1].feedback if reviews else None
-            plan = await orchestrator.create_plan(
-                user_query=user_query,
-                workers=workers_info,
-                reviewer=reviewer_info,
-                previous_feedback=previous_feedback,
-                previous_plan=plan,
-            )
+            if self.use_function_calling and tools:
+                plan = await orchestrator.create_plan_with_tools(
+                    user_query=user_query,
+                    workers=workers_info,
+                    tools=tools,
+                    reviewer=reviewer_info,
+                    previous_feedback=previous_feedback,
+                    previous_plan=plan,
+                )
+            else:
+                plan = await orchestrator.create_plan(
+                    user_query=user_query,
+                    workers=workers_info,
+                    reviewer=reviewer_info,
+                    previous_feedback=previous_feedback,
+                    previous_plan=plan,
+                )
 
             self.exec_repo.complete_execution(
                 execution_id=execution_id,
@@ -161,6 +183,7 @@ class AgentExecutor:
             worker_outputs: list[SkillResult] = []
             all_references = []
             for step in plan.steps:
+                step.started_at = time.time()
                 worker = workers.get(step.member_agent_id)
                 if worker is None:
                     step.result = SkillResult(
@@ -170,6 +193,8 @@ class AgentExecutor:
                     )
                     step.status = "failed"
                     worker_outputs.append(step.result)
+                    step.completed_at = time.time()
+                    step.elapsed_ms = 0
                     continue
 
                 # 合并 worker 的 step_template 到 step.input
@@ -181,6 +206,8 @@ class AgentExecutor:
                 step.input = merged_input
 
                 result = await worker.execute_step(user_query, step, context)
+                step.completed_at = time.time()
+                step.elapsed_ms = int((step.completed_at - step.started_at) * 1000)
                 worker_outputs.append(result)
                 all_references.extend(result.references)
 
@@ -220,7 +247,11 @@ class AgentExecutor:
 
             revision_count += 1
 
-        status = "success" if revision_count <= MAX_REVISIONS else "max_revisions_reached"
+        # 对最终输出进行 HTML 美化
+        if self.formatter is not None and final_answer:
+            final_answer = await self.formatter.format(final_answer)
+
+        status = "success" if revision_count <= self.max_revisions else "max_revisions_reached"
 
         self.exec_repo.complete_execution(
             execution_id=execution_id,
@@ -233,7 +264,7 @@ class AgentExecutor:
         for review in reviews:
             self.exec_repo.create_review(
                 execution_id=execution_id,
-                reviewer_agent_id=reviewer.member_agent_id if reviewer else None,
+                reviewer_agent_id=reviewer.agent_id if reviewer else None,
                 verdict=review.verdict,
                 feedback=review.feedback,
                 defects=review.defects,
@@ -334,15 +365,27 @@ class AgentExecutor:
         revision_count = 0
         all_references: list[dict[str, Any]] = []
 
-        while revision_count <= MAX_REVISIONS:
+        tools = SkillRegistry.as_openai_tools()
+
+        while revision_count <= self.max_revisions:
             previous_feedback = reviews[-1].feedback if reviews else None
-            plan = await orchestrator.create_plan(
-                user_query=user_query,
-                workers=workers_info,
-                reviewer=reviewer_info,
-                previous_feedback=previous_feedback,
-                previous_plan=plan,
-            )
+            if self.use_function_calling and tools:
+                plan = await orchestrator.create_plan_with_tools(
+                    user_query=user_query,
+                    workers=workers_info,
+                    tools=tools,
+                    reviewer=reviewer_info,
+                    previous_feedback=previous_feedback,
+                    previous_plan=plan,
+                )
+            else:
+                plan = await orchestrator.create_plan(
+                    user_query=user_query,
+                    workers=workers_info,
+                    reviewer=reviewer_info,
+                    previous_feedback=previous_feedback,
+                    previous_plan=plan,
+                )
             yield "plan", {
                 "reasoning": plan.reasoning,
                 "expected_output": plan.expected_output,
@@ -353,11 +396,18 @@ class AgentExecutor:
             worker_outputs: list[SkillResult] = []
             all_references = []
             for step in plan.steps:
+                # reviewer 步骤在 worker 全部执行完、生成回答后再执行
+                if step.role == "reviewer":
+                    continue
+                step.started_at = time.time()
                 yield "step_start", {
                     "step_number": step.step_number,
+                    "role": step.role,
                     "worker": workers.get(step.member_agent_id, WorkerAgent(-1, "unknown")).name,
                     "action": step.action,
                     "reason": step.reason,
+                    "input": step.input,
+                    "started_at": step.started_at,
                 }
                 worker = workers.get(step.member_agent_id)
                 if worker is None:
@@ -374,6 +424,8 @@ class AgentExecutor:
                     template = worker_info.get("step_template") or {}
                     step.input = {**template, **step.input}
                     await worker.execute_step(user_query, step, context)
+                step.completed_at = time.time()
+                step.elapsed_ms = int((step.completed_at - step.started_at) * 1000)
                 worker_outputs.append(step.result)
                 if step.result:
                     all_references.extend(step.result.references)
@@ -382,6 +434,9 @@ class AgentExecutor:
                     "status": step.status,
                     "summary": step.result.content[:500] if step.result else "",
                     "error": step.result.error if step.result else None,
+                    "started_at": step.started_at,
+                    "completed_at": step.completed_at,
+                    "elapsed_ms": step.elapsed_ms,
                 }
 
             draft_context = "\n\n".join(
@@ -403,24 +458,100 @@ class AgentExecutor:
 
             yield "references", all_references
 
+            # 先收集完整最终回答
+            final_answer_parts: list[str] = []
             async for delta in self.llm.chat_stream(
                 final_prompt, "", composite.system_prompt
             ):
-                yield "delta", {"delta": delta}
+                final_answer_parts.append(delta)
+            final_answer = "".join(final_answer_parts)
+
+            # 对最终输出进行 HTML 美化，然后分段流式输出
+            if self.formatter is not None and final_answer:
+                final_answer = await self.formatter.format(final_answer)
+
+            # 模拟流式输出格式化后的内容
+            chunk_size = 12
+            for i in range(0, len(final_answer), chunk_size):
+                yield "delta", {"delta": final_answer[i : i + chunk_size]}
 
             if reviewer is None:
                 break
 
-            review_result = await reviewer.review(
-                user_query=user_query,
-                plan=plan,
-                worker_outputs=worker_outputs,
-                draft_answer="",  # 流式场景暂不传完整 answer
-            )
-            reviews.append(review_result)
-            yield "review", review_result.to_dict()
+            # 执行 plan 中已声明的 reviewer 步骤，让其作为执行轨迹的一部分展示
+            review_requires_revision = False
+            for step in plan.steps:
+                if step.role != "reviewer":
+                    continue
+                step.started_at = time.time()
+                yield "step_start", {
+                    "step_number": step.step_number,
+                    "role": step.role,
+                    "worker": reviewer.name,
+                    "action": step.action,
+                    "reason": step.reason,
+                    "input": step.input,
+                    "started_at": step.started_at,
+                }
+                review_result = await reviewer.review(
+                    user_query=user_query,
+                    plan=plan,
+                    worker_outputs=worker_outputs,
+                    draft_answer=final_answer,
+                )
+                reviews.append(review_result)
+                step.status = "completed"
+                step.completed_at = time.time()
+                step.elapsed_ms = int((step.completed_at - step.started_at) * 1000)
+                yield "review", review_result.to_dict()
+                yield "step_complete", {
+                    "step_number": step.step_number,
+                    "status": step.status,
+                    "summary": review_result.feedback[:300],
+                    "error": None,
+                    "started_at": step.started_at,
+                    "completed_at": step.completed_at,
+                    "elapsed_ms": step.elapsed_ms,
+                }
+                review_requires_revision = review_result.requires_revision
 
-            if not review_result.requires_revision:
+                if review_requires_revision:
+                    # 动态追加 revise 步骤并展示
+                    revise_step = PlanStep(
+                        step_number=len(plan.steps) + 1,
+                        role="orchestrator",
+                        member_agent_id=orchestrator_member["member_agent_id"],
+                        action="revise",
+                        input={"feedback": review_result.feedback},
+                        reason="根据评审意见重新规划",
+                    )
+                    plan.steps.append(revise_step)
+                    revise_step.started_at = time.time()
+                    yield "step_start", {
+                        "step_number": revise_step.step_number,
+                        "role": revise_step.role,
+                        "worker": orchestrator.name,
+                        "action": revise_step.action,
+                        "reason": revise_step.reason,
+                        "input": revise_step.input,
+                        "started_at": revise_step.started_at,
+                    }
+                    revise_step.status = "completed"
+                    revise_step.completed_at = time.time()
+                    revise_step.elapsed_ms = int(
+                        (revise_step.completed_at - revise_step.started_at) * 1000
+                    )
+                    yield "step_complete", {
+                        "step_number": revise_step.step_number,
+                        "status": revise_step.status,
+                        "summary": "",
+                        "error": None,
+                        "started_at": revise_step.started_at,
+                        "completed_at": revise_step.completed_at,
+                        "elapsed_ms": revise_step.elapsed_ms,
+                    }
+
+            if not review_requires_revision:
                 break
 
             revision_count += 1

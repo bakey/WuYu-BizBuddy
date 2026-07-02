@@ -3,6 +3,7 @@ import { useToast } from '@/composables/useToast'
 import { useCitationPreview } from '@/composables/useCitationPreview'
 import { useChatInput } from '@/composables/useChatInput'
 import { downloadText, stripHtml, copyText } from '@/utils/file'
+import { computed } from 'vue'
 
 const { toast } = useToast()
 const { openPreview } = useCitationPreview()
@@ -11,6 +12,37 @@ const { focusInput } = useChatInput()
 const props = defineProps({
   message: { type: Object, required: true }
 })
+
+const totalElapsed = computed(() => {
+  const steps = props.message.trace?.steps || []
+  return steps.reduce((sum, s) => sum + (s.elapsed_ms || 0), 0)
+})
+
+function statusLabel(status) {
+  const map = {
+    pending: '待执行',
+    running: '执行中',
+    completed: '已完成',
+    failed: '失败'
+  }
+  return map[status] || status
+}
+
+function scopeLabel(scope) {
+  const map = {
+    national: '国家级',
+    local: '地方级',
+    standard: '标准规范',
+    case: '案例'
+  }
+  return map[scope] || scope
+}
+
+function roleLabel(role, action) {
+  if (role === 'reviewer' || action === 'review') return '评审'
+  if (role === 'orchestrator' && action === 'revise') return '修订'
+  return ''
+}
 
 function onCite(c) {
   if (c.content) openPreview(c)
@@ -52,6 +84,60 @@ async function onAction(label) {
       </div>
     </div>
 
+    <!-- Execution trace: visible as soon as plan arrives, even while thinking -->
+    <div v-if="message.trace" class="execution-trace">
+      <div class="trace-toggle" @click="message._showTrace = !message._showTrace">
+        <span class="trace-dot"></span>
+        {{ message._showTrace ? '收起执行轨迹' : '查看执行轨迹' }}
+        <span class="trace-count">
+          {{ message.trace.steps.length }} 步骤
+          <span v-if="message.trace.reviews.length">· {{ message.trace.reviews.length }} 评审</span>
+        </span>
+      </div>
+      <div v-if="message._showTrace" class="trace-body">
+        <div v-if="message.trace.plan" class="trace-section">
+          <div class="trace-title">📋 执行计划</div>
+          <div class="trace-text">{{ message.trace.plan.reasoning }}</div>
+        </div>
+        <div v-if="message.trace.steps.length" class="trace-section">
+          <div class="trace-title">🛠️ 执行步骤</div>
+          <div class="trace-summary-line">
+            共 {{ message.trace.steps.length }} 步 · 总耗时 {{ totalElapsed }} ms
+          </div>
+          <div
+            v-for="step in message.trace.steps"
+            :key="step.step_number"
+            class="trace-step"
+            :class="{ failed: step.status === 'failed', running: step.status === 'running', pending: step.status === 'pending' }"
+          >
+            <span class="trace-step-num">#{{ step.step_number }}</span>
+            <span class="trace-step-action">{{ step.action }}</span>
+            <span v-if="roleLabel(step.role, step.action)" class="trace-step-role">{{ roleLabel(step.role, step.action) }}</span>
+            <span v-if="step.input?.policy_scope" class="trace-step-scope">{{ scopeLabel(step.input.policy_scope) }}</span>
+            <span class="trace-step-status" :class="step.status">{{ statusLabel(step.status) }}</span>
+            <span v-if="step.elapsed_ms != null" class="trace-step-time">⏱ {{ step.elapsed_ms }} ms</span>
+            <span v-else-if="step.status === 'running'" class="trace-step-time running">执行中…</span>
+            <span v-else-if="step.status === 'pending'" class="trace-step-time pending">待执行</span>
+            <div v-if="step.reason" class="trace-text">{{ step.reason }}</div>
+            <div v-if="step.summary" class="trace-text trace-summary">{{ step.summary }}</div>
+            <div v-if="step.error" class="trace-error">{{ step.error }}</div>
+          </div>
+        </div>
+        <div v-if="message.trace.reviews.length" class="trace-section">
+          <div class="trace-title">🔍 评审意见</div>
+          <div
+            v-for="(review, idx) in message.trace.reviews"
+            :key="idx"
+            class="trace-review"
+            :class="{ pass: review.verdict === 'pass', revise: review.verdict === 'revise' }"
+          >
+            <span class="trace-verdict">{{ review.verdict }}</span>
+            <div class="trace-text">{{ review.feedback }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Normal response -->
     <div v-else class="msg-bubble-ai">
       <div v-if="message.skillCall" class="skill-call">
@@ -80,52 +166,6 @@ async function onAction(label) {
           :class="{ green: a.variant === 'green' }"
           @click="onAction(a.label)"
         >{{ a.label }}</button>
-      </div>
-
-      <!-- Composite Agent execution trace -->
-      <div v-if="message.trace" class="execution-trace">
-        <div class="trace-toggle" @click="message._showTrace = !message._showTrace">
-          <span class="trace-dot"></span>
-          {{ message._showTrace ? '收起执行轨迹' : '查看执行轨迹' }}
-          <span class="trace-count">
-            {{ message.trace.steps.length }} 步骤
-            <span v-if="message.trace.reviews.length">· {{ message.trace.reviews.length }} 评审</span>
-          </span>
-        </div>
-        <div v-if="message._showTrace" class="trace-body">
-          <div v-if="message.trace.plan" class="trace-section">
-            <div class="trace-title">📋 执行计划</div>
-            <div class="trace-text">{{ message.trace.plan.reasoning }}</div>
-          </div>
-          <div v-if="message.trace.steps.length" class="trace-section">
-            <div class="trace-title">🛠️ 执行步骤</div>
-            <div
-              v-for="step in message.trace.steps"
-              :key="step.step_number"
-              class="trace-step"
-              :class="{ failed: step.status === 'failed' }"
-            >
-              <span class="trace-step-num">#{{ step.step_number }}</span>
-              <span class="trace-step-action">{{ step.action }}</span>
-              <span class="trace-step-status">{{ step.status }}</span>
-              <div v-if="step.reason" class="trace-text">{{ step.reason }}</div>
-              <div v-if="step.summary" class="trace-text trace-summary">{{ step.summary }}</div>
-              <div v-if="step.error" class="trace-error">{{ step.error }}</div>
-            </div>
-          </div>
-          <div v-if="message.trace.reviews.length" class="trace-section">
-            <div class="trace-title">🔍 评审意见</div>
-            <div
-              v-for="(review, idx) in message.trace.reviews"
-              :key="idx"
-              class="trace-review"
-              :class="{ pass: review.verdict === 'pass', revise: review.verdict === 'revise' }"
-            >
-              <span class="trace-verdict">{{ review.verdict }}</span>
-              <div class="trace-text">{{ review.feedback }}</div>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   </div>
@@ -232,12 +272,74 @@ async function onAction(label) {
   font-weight: 600;
   color: var(--ink2);
 }
+.trace-step-scope {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: #F0F5FF;
+  color: #2F54EB;
+}
+.trace-step-role {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: #FFF7E6;
+  color: #FA8C16;
+}
 .trace-step-status {
   font-size: 10px;
   padding: 1px 6px;
   border-radius: 10px;
   background: #E6F7FF;
   color: #1890FF;
+}
+.trace-step.pending {
+  opacity: 0.7;
+  background: var(--surface2);
+}
+.trace-step.running {
+  background: #FFFBE6;
+  border: 1px solid #FFD591;
+  box-shadow: 0 0 0 2px rgba(250, 140, 22, 0.15);
+}
+.trace-step-status.pending {
+  background: #F5F5F5;
+  color: var(--ink4);
+}
+.trace-step-status.running {
+  background: #FFF7E6;
+  color: #FA8C16;
+  animation: pulse 1.5s infinite;
+}
+.trace-step-status.completed {
+  background: #F6FFED;
+  color: #52C41A;
+}
+.trace-step-status.failed {
+  background: #FFF1F0;
+  color: #CF1322;
+}
+.trace-step-time {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--ink4);
+  font-family: monospace;
+}
+.trace-step-time.running {
+  color: #FA8C16;
+}
+.trace-step-time.pending {
+  color: var(--ink4);
+}
+@keyframes pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.6; }
+  100% { opacity: 1; }
+}
+.trace-summary-line {
+  font-size: 11px;
+  color: var(--ink3);
+  margin-bottom: 6px;
 }
 .trace-summary {
   width: 100%;

@@ -1,6 +1,7 @@
 """大模型服务."""
 
 from collections.abc import AsyncGenerator
+from typing import Any
 
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
@@ -94,6 +95,59 @@ class LLMService:
             return response.choices[0].message.content or ""
         except Exception as exc:
             raise LLMError(f"LLM 调用失败: {exc}") from exc
+
+    async def chat_with_tools(
+        self,
+        prompt: str,
+        tools: list[dict[str, Any]],
+        system_prompt: str | None = None,
+        tool_choice: str = "auto",
+    ) -> dict[str, Any]:
+        """非流式 function calling 对话.
+
+        Args:
+            prompt: 用户问题.
+            tools: OpenAI tools 定义列表.
+            system_prompt: 系统提示词.
+            tool_choice: "auto" / "none" / {"type": "function", "function": {"name": "..."}}
+
+        Returns:
+            OpenAI 响应的 message 对象字典（包含 tool_calls 或 content）。
+
+        Raises:
+            LLMError: 调用失败.
+        """
+        if self.mock:
+            return {"role": "assistant", "content": self._mock_answer(prompt, "")}
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt or self.SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                tools=tools,
+                tool_choice=tool_choice,
+                temperature=0.3,
+            )
+            message = response.choices[0].message
+            return {
+                "role": message.role,
+                "content": message.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": tc.type,
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in (message.tool_calls or [])
+                ],
+            }
+        except Exception as exc:
+            raise LLMError(f"LLM function calling 调用失败: {exc}") from exc
 
     async def chat_stream(
         self,

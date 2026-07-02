@@ -63,5 +63,10 @@ class Settings(BaseSettings):
     # 重排前向量多召回的候选数量（over-fetch），最终再截断到 top_k。
     industry_rerank_over_fetch_k: int = 30
 
+    # Agent 框架：Reviewer 最大修订轮数，0 表示不评审。
+    agent_max_revisions: int = 1
+    # Agent 框架：是否对复合 Agent 的最终输出进行 HTML 美化。
+    agent_format_output: bool = True
+
 
 settings = Settings()

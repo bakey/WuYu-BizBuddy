@@ -54,6 +54,39 @@ class ChatTask(Base):
     )
 
 
+class SkillDefinition(Base):
+    """Skill 定义表：支持内部 Skill 和外部 OpenAI function 格式."""
+
+    __tablename__ = "skills"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False, unique=True, comment="Skill 名称")
+    alias = Column(String(100), nullable=True, comment="外部系统别名")
+    format = Column(
+        String(50), nullable=False, default="native", comment="格式: native/openai_function"
+    )
+    description = Column(Text, nullable=False, comment="Skill 能力描述")
+    parameters_schema = Column(JSON, nullable=False, default=dict, comment="输入参数 JSON Schema")
+    config = Column(JSON, nullable=False, default=dict, comment="外部配置")
+    handler_module = Column(
+        String(255), nullable=True, comment="内部 handler 模块路径，native 格式用"
+    )
+    enabled = Column(Boolean, nullable=False, default=True, comment="是否启用")
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        comment="创建时间",
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+        comment="更新时间",
+    )
+
+
 class Agent(Base):
     """Agent 表."""
 

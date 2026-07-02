@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from bizbuddy_rag.db.models import Agent, ChatTask, Document
+from bizbuddy_rag.db.models import Agent, ChatTask, Document, SkillDefinition
 
 
 class DocumentRepository:
@@ -291,6 +291,68 @@ class ChatTaskRepository:
         self.db.delete(task)
         self.db.commit()
         return True
+
+
+class SkillRepository:
+    """Skill 定义数据仓库."""
+
+    def __init__(self, db: Session) -> None:
+        """初始化仓库.
+
+        Args:
+            db: SQLAlchemy 会话.
+        """
+        self.db = db
+
+    def get_by_name(self, name: str) -> SkillDefinition | None:
+        """按名称查询 Skill."""
+        stmt = select(SkillDefinition).where(
+            SkillDefinition.name == name, SkillDefinition.enabled.is_(True)
+        )
+        return self.db.execute(stmt).scalars().first()
+
+    def list_skills(
+        self,
+        format: str | None = None,
+        only_enabled: bool = True,
+        limit: int = 200,
+    ) -> Sequence[SkillDefinition]:
+        """列出 Skill 定义."""
+        stmt = select(SkillDefinition)
+        if only_enabled:
+            stmt = stmt.where(SkillDefinition.enabled.is_(True))
+        if format:
+            stmt = stmt.where(SkillDefinition.format == format)
+        stmt = stmt.order_by(SkillDefinition.name).limit(limit)
+        return self.db.execute(stmt).scalars().all()
+
+    def create(
+        self,
+        *,
+        name: str,
+        description: str,
+        parameters_schema: dict[str, object] | None = None,
+        format: str = "native",
+        alias: str | None = None,
+        config: dict[str, object] | None = None,
+        handler_module: str | None = None,
+        enabled: bool = True,
+    ) -> SkillDefinition:
+        """创建 Skill 定义."""
+        skill = SkillDefinition(
+            name=name,
+            alias=alias,
+            format=format,
+            description=description,
+            parameters_schema=parameters_schema or {},
+            config=config or {},
+            handler_module=handler_module,
+            enabled=enabled,
+        )
+        self.db.add(skill)
+        self.db.commit()
+        self.db.refresh(skill)
+        return skill
 
 
 class AgentRepository:
