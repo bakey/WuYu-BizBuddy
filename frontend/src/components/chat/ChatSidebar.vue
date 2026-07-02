@@ -21,6 +21,15 @@ async function onNewTask() {
   return task
 }
 
+function onSwitchAgent(event) {
+  const id = Number(event.target.value)
+  const agent = chat.availableAgents.find(a => a.id === id)
+  if (agent) {
+    chat.setCurrentAgent(agent)
+    toast(`已切换到 Agent：${agent.name}`, 'info')
+  }
+}
+
 async function onTogglePin(task, event) {
   event.stopPropagation()
   const updated = await chat.togglePinTask(task.id)
@@ -63,10 +72,26 @@ const recentTasks = () => chat.taskHistory.filter(t => !t.pinned)
             </div>
             <div style="flex:1">
               <div style="font-size:13px;font-weight:700">{{ chat.currentAgent.name }}</div>
-              <div style="font-size:11px;color:var(--ink3)">自带 {{ chat.currentAgent.skillCount }} 个技能</div>
+              <div style="font-size:11px;color:var(--ink3)">
+                自带 {{ chat.currentAgent.skillCount }} 个技能
+                · {{ chat.currentAgent.agentType === 'composite' ? '复合 Agent' : (chat.currentAgent.retrievalMode || 'basic_rag') }}
+              </div>
             </div>
           </div>
-          <button class="btn-secondary" style="width:100%">切换 Agent</button>
+          <select
+            class="btn-secondary"
+            style="width:100%; appearance:auto; padding:0 10px"
+            @change="onSwitchAgent($event)"
+          >
+            <option
+              v-for="a in chat.availableAgents"
+              :key="a.id"
+              :value="a.id"
+              :selected="a.id === chat.currentAgent.id"
+            >
+              {{ a.name }}
+            </option>
+          </select>
         </div>
       </div>
 

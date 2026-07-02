@@ -81,6 +81,52 @@ async function onAction(label) {
           @click="onAction(a.label)"
         >{{ a.label }}</button>
       </div>
+
+      <!-- Composite Agent execution trace -->
+      <div v-if="message.trace" class="execution-trace">
+        <div class="trace-toggle" @click="message._showTrace = !message._showTrace">
+          <span class="trace-dot"></span>
+          {{ message._showTrace ? '收起执行轨迹' : '查看执行轨迹' }}
+          <span class="trace-count">
+            {{ message.trace.steps.length }} 步骤
+            <span v-if="message.trace.reviews.length">· {{ message.trace.reviews.length }} 评审</span>
+          </span>
+        </div>
+        <div v-if="message._showTrace" class="trace-body">
+          <div v-if="message.trace.plan" class="trace-section">
+            <div class="trace-title">📋 执行计划</div>
+            <div class="trace-text">{{ message.trace.plan.reasoning }}</div>
+          </div>
+          <div v-if="message.trace.steps.length" class="trace-section">
+            <div class="trace-title">🛠️ 执行步骤</div>
+            <div
+              v-for="step in message.trace.steps"
+              :key="step.step_number"
+              class="trace-step"
+              :class="{ failed: step.status === 'failed' }"
+            >
+              <span class="trace-step-num">#{{ step.step_number }}</span>
+              <span class="trace-step-action">{{ step.action }}</span>
+              <span class="trace-step-status">{{ step.status }}</span>
+              <div v-if="step.reason" class="trace-text">{{ step.reason }}</div>
+              <div v-if="step.summary" class="trace-text trace-summary">{{ step.summary }}</div>
+              <div v-if="step.error" class="trace-error">{{ step.error }}</div>
+            </div>
+          </div>
+          <div v-if="message.trace.reviews.length" class="trace-section">
+            <div class="trace-title">🔍 评审意见</div>
+            <div
+              v-for="(review, idx) in message.trace.reviews"
+              :key="idx"
+              class="trace-review"
+              :class="{ pass: review.verdict === 'pass', revise: review.verdict === 'revise' }"
+            >
+              <span class="trace-verdict">{{ review.verdict }}</span>
+              <div class="trace-text">{{ review.feedback }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -114,4 +160,110 @@ async function onAction(label) {
   box-shadow: 0 3px 8px rgba(5,150,105,.2);
 }
 .msg-user-time { font-size: 10px; color: var(--ink4); align-self: flex-end; }
+
+.execution-trace {
+  margin-top: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.trace-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--ink2);
+  cursor: pointer;
+  user-select: none;
+}
+.trace-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #1890FF;
+}
+.trace-count {
+  margin-left: auto;
+  color: var(--ink4);
+  font-size: 11px;
+}
+.trace-body {
+  padding: 0 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.trace-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.trace-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.trace-text {
+  font-size: 11px;
+  color: var(--ink3);
+  line-height: 1.5;
+}
+.trace-step {
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--surface2);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.trace-step.failed {
+  background: #FFF1F0;
+  border: 1px solid #FFCCC7;
+}
+.trace-step-num {
+  font-size: 10px;
+  color: var(--ink4);
+}
+.trace-step-action {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink2);
+}
+.trace-step-status {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: #E6F7FF;
+  color: #1890FF;
+}
+.trace-summary {
+  width: 100%;
+  margin-top: 4px;
+}
+.trace-error {
+  width: 100%;
+  color: #CF1322;
+  font-size: 11px;
+}
+.trace-review {
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--surface2);
+}
+.trace-review.pass {
+  background: #F6FFED;
+  border: 1px solid #B7EB8F;
+}
+.trace-review.revise {
+  background: #FFF7E6;
+  border: 1px solid #FFD591;
+}
+.trace-verdict {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
 </style>

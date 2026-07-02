@@ -12,13 +12,7 @@ const chatStore  = useChatStore()
 const { toast }  = useToast()
 
 function onUse(agent) {
-  chatStore.setCurrentAgent({
-    name: agent.name,
-    icon: agent.icon,
-    bg: agent.bg,
-    color: agent.color,
-    skillCount: agent.skills.length
-  })
+  chatStore.setCurrentAgent(agent)
   appStore.setTab('chat')
   toast(`已切换到 Agent · ${agent.name}`, 'ok')
 }

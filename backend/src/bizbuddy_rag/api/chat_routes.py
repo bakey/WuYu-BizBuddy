@@ -41,6 +41,7 @@ def _task_out(task: ChatTask) -> ChatTaskOut:
         active=task.active,
         agent_name=task.agent_name,
         agent_icon=task.agent_icon,
+        agent_id=task.agent_id,
         created_at=_format_dt(task.created_at),
         updated_at=_format_dt(task.updated_at),
     )
@@ -71,6 +72,7 @@ async def create_task(
         pinned=payload.pinned,
         agent_name=payload.agent_name,
         agent_icon=payload.agent_icon,
+        agent_id=payload.agent_id,
     )
     return _task_out(task)
 
@@ -103,6 +105,7 @@ async def update_task(
         pin=payload.pin,
         pinned=payload.pinned,
         active=payload.active,
+        agent_id=payload.agent_id,
     )
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")

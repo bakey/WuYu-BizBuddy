@@ -96,13 +96,17 @@ class LLMService:
             raise LLMError(f"LLM 调用失败: {exc}") from exc
 
     async def chat_stream(
-        self, prompt: str, context: str
+        self,
+        prompt: str,
+        context: str,
+        system_prompt: str | None = None,
     ) -> AsyncGenerator[str]:
         """流式对话.
 
         Args:
             prompt: 用户问题.
             context: 参考资料.
+            system_prompt: 自定义系统提示词.
 
         Yields:
             回答文本片段.
@@ -120,7 +124,7 @@ class LLMService:
         try:
             stream = await self.client.chat.completions.create(
                 model=self.model,
-                messages=self._build_messages(prompt, context),
+                messages=self._build_messages(prompt, context, system_prompt),
                 temperature=0.3,
                 stream=True,
             )

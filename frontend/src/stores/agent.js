@@ -56,7 +56,11 @@ export const useAgentStore = defineStore('agent', () => {
       featured: a.featured,
       category: a.category,
       tag: a.tag,
-      source: a.source
+      source: a.source,
+      systemPrompt: a.system_prompt,
+      defaultTopK: a.default_top_k,
+      retrievalMode: a.retrieval_mode,
+      industrySkillId: a.industry_skill_id
     }
   }
 

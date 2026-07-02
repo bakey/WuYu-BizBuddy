@@ -1,0 +1,11 @@
+# Docker 运行依赖（torch 在 Dockerfile 里单独装 CPU 版）
+fastapi
+httpx
+openai
+pgvector
+psycopg2-binary
+pydantic-settings
+python-dotenv
+sentence-transformers
+sqlalchemy
+uvicorn

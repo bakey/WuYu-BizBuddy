@@ -38,6 +38,7 @@ class ChatTask(Base):
     active = Column(Boolean, nullable=False, default=False, comment="是否当前激活")
     agent_name = Column(String(255), nullable=True, comment="Agent 名称")
     agent_icon = Column(String(50), nullable=True, comment="Agent 图标")
+    agent_id = Column(Integer, nullable=True, comment="当前使用的 Agent ID")
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -59,6 +60,9 @@ class Agent(Base):
     __tablename__ = "agents"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    agent_type = Column(
+        String(20), nullable=False, default="simple", comment="Agent 类型: simple/composite"
+    )
     name = Column(String(255), nullable=False, unique=True, comment="Agent 名称")
     icon = Column(String(50), nullable=False, comment="图标")
     bg = Column(String(100), nullable=False, comment="背景色")
@@ -73,6 +77,11 @@ class Agent(Base):
     tag_cls = Column(String(50), nullable=True, comment="标签样式类")
     source = Column(String(50), nullable=False, default="官方 Agent", comment="来源")
     enabled = Column(Boolean, nullable=False, default=True, comment="是否启用")
+    system_prompt = Column(Text, nullable=True, comment="系统提示词")
+    default_top_k = Column(Integer, nullable=False, default=5, comment="默认检索数量")
+    retrieval_mode = Column(String(50), nullable=False, default="basic_rag", comment="检索模式")
+    industry_skill_id = Column(String(36), nullable=True, comment="行业知识 skill_id")
+    config = Column(JSON, nullable=False, default=dict, comment="扩展配置")
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,

@@ -1,21 +1,20 @@
 import { defineStore } from 'pinia'
-import { onMounted, ref, reactive } from 'vue'
+import { onMounted, ref, reactive, computed } from 'vue'
 
-const STREAM_RESPONSES = [
-  '已检索 3 个数据库，找到 12 篇高相关政策文件。让我逐一对比关键条款...',
-  '基于您的问题，我调用了 [政策检索] + [条文比对] 两项技能，结果如下：',
-  '我注意到您关注的是危废处置政策。根据最新数据，2025 年 4 季度全国危废处置量同比增长 8.2%。',
-  '已调用 [影响评估]，对此政策的潜在影响进行了综合评估，主要风险点包括以下几个方面...'
-]
+const DEFAULT_AGENT = {
+  id: null,
+  name: '政策解析专家',
+  icon: '📜',
+  bg: 'var(--primary-light)',
+  color: 'var(--primary)',
+  skillCount: 4,
+  systemPrompt: null
+}
 
 export const useChatStore = defineStore('chat', () => {
-  const currentAgent = reactive({
-    name: '政策解析专家',
-    icon: '📄',
-    bg: 'var(--primary-light)',
-    color: 'var(--primary)',
-    skillCount: 4
-  })
+  const currentAgent = reactive({ ...DEFAULT_AGENT })
+  const availableAgents = ref([])
+  const loadingAgents = ref(false)
 
   const dataSources = ref([
     { id: 1, name: '政策法规库', count: '12.4万', checked: true },
@@ -27,16 +26,23 @@ export const useChatStore = defineStore('chat', () => {
   const taskHistory = ref([])
   const loadingTasks = ref(false)
 
-  const messages = ref([
-    {
-      id: 1, role: 'ai', sender: '政策解析专家', time: '14:30',
-      content: '您好！我是<strong>政策解析专家</strong>，我自带 <strong>政策检索</strong>、<strong>条文比对</strong>、<strong>影响评估</strong>、<strong>合规清单</strong> 4 个技能。请描述您要研究的政策问题。'
-    }
-  ])
-
+  const messages = ref([])
   const citations = ref([])
 
-  let _nextId = messages.value.length + 1
+  let _nextId = 1
+
+  const welcomeMessage = computed(() => {
+    const skillsText = currentAgent.skills?.length
+      ? currentAgent.skills.slice(0, 4).join('</strong>、<strong>')
+      : ''
+    return {
+      id: _nextId++,
+      role: 'ai',
+      sender: currentAgent.name,
+      time: new Date().toTimeString().slice(0, 5),
+      content: `您好！我是<strong>${currentAgent.name}</strong>${skillsText ? `，我自带 <strong>${skillsText}</strong> ${currentAgent.skills.length} 个技能` : ''}。请描述您要研究的问题。`
+    }
+  })
 
   async function api(path, options = {}) {
     const resp = await fetch(`/api/v1${path}`, {
@@ -50,16 +56,78 @@ export const useChatStore = defineStore('chat', () => {
     return resp.status === 204 ? null : resp.json()
   }
 
+  function _mapAgent(a) {
+    return {
+      id: a.id,
+      name: a.name,
+      agentType: a.agent_type || 'simple',
+      icon: a.icon,
+      bg: a.bg,
+      color: a.color,
+      desc: a.desc,
+      skills: a.skills || [],
+      users: a.users,
+      rating: a.rating,
+      featured: a.featured,
+      category: a.category,
+      tag: a.tag,
+      source: a.source,
+      systemPrompt: a.system_prompt,
+      defaultTopK: a.default_top_k,
+      retrievalMode: a.retrieval_mode
+    }
+  }
+
+  async function loadAgents() {
+    loadingAgents.value = true
+    try {
+      const items = await api('/agents')
+      availableAgents.value = items.map(_mapAgent)
+      if (availableAgents.value.length > 0 && !currentAgent.id) {
+        const featured = availableAgents.value.find(a => a.featured)
+        setCurrentAgent(featured || availableAgents.value[0])
+      }
+    } catch (err) {
+      console.error('加载 Agent 失败', err)
+    } finally {
+      loadingAgents.value = false
+    }
+  }
+
+  function setCurrentAgent(agent) {
+    Object.assign(currentAgent, {
+      id: agent.id,
+      name: agent.name,
+      agentType: agent.agentType || agent.agent_type || 'simple',
+      icon: agent.icon,
+      bg: agent.bg,
+      color: agent.color,
+      skillCount: agent.skills?.length || 0,
+      skills: agent.skills || [],
+      systemPrompt: agent.systemPrompt || agent.system_prompt || null,
+      defaultTopK: agent.defaultTopK || agent.default_top_k || 5,
+      retrievalMode: agent.retrievalMode || agent.retrieval_mode || 'basic_rag'
+    })
+    resetMessages()
+  }
+
+  function resetMessages() {
+    messages.value = [welcomeMessage.value]
+    citations.value = []
+    _nextId = messages.value.length + 1
+  }
+
   function _mapTask(t) {
     return {
       id: t.id,
       title: t.title,
-      meta: t.meta || `${currentAgent.name} · 刚刚`,
+      meta: t.meta || `${t.agent_name || currentAgent.name} · 刚刚`,
       pin: t.pin || '',
       pinned: t.pinned,
       active: t.active,
       agentName: t.agent_name,
-      agentIcon: t.agent_icon
+      agentIcon: t.agent_icon,
+      agentId: t.agent_id
     }
   }
 
@@ -81,7 +149,8 @@ export const useChatStore = defineStore('chat', () => {
       meta: options.meta || `${currentAgent.name} · 刚刚`,
       pinned: options.pinned || false,
       agent_name: currentAgent.name,
-      agent_icon: currentAgent.icon
+      agent_icon: currentAgent.icon,
+      agent_id: currentAgent.id
     }
     const t = await api('/chat/tasks', {
       method: 'POST',
@@ -96,6 +165,10 @@ export const useChatStore = defineStore('chat', () => {
   async function activateTask(id) {
     const t = await api(`/chat/tasks/${id}/activate`, { method: 'POST' })
     const updated = _mapTask(t)
+    if (updated.agentId) {
+      const agent = availableAgents.value.find(a => a.id === updated.agentId)
+      if (agent) setCurrentAgent(agent)
+    }
     taskHistory.value = taskHistory.value.map(item =>
       item.id === updated.id ? updated : { ...item, active: false }
     )
@@ -131,6 +204,11 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function sendMessage(text) {
+    if (!currentAgent.id) {
+      console.error('未选择 Agent')
+      return
+    }
+
     const now = new Date().toTimeString().slice(0, 5)
     messages.value.push({ id: _nextId++, role: 'user', time: now, content: text })
 
@@ -141,10 +219,15 @@ export const useChatStore = defineStore('chat', () => {
     })
 
     try {
-      const resp = await fetch('/api/v1/query/stream', {
+      const isComposite = currentAgent.agentType === 'composite'
+      const endpoint = isComposite
+        ? `/api/v1/agents/${currentAgent.id}/execute/stream`
+        : `/api/v1/agents/${currentAgent.id}/query/stream`
+
+      const resp = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: text, top_k: 5 })
+        body: JSON.stringify({ prompt: text, top_k: currentAgent.defaultTopK || 5 })
       })
 
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
@@ -156,6 +239,9 @@ export const useChatStore = defineStore('chat', () => {
       let msgRefs = []
       let started = false
       let eventType = ''
+      let trace = isComposite
+        ? { plan: null, steps: [], reviews: [], revision: 0 }
+        : null
 
       while (true) {
         const { value, done } = await reader.read()
@@ -201,12 +287,31 @@ export const useChatStore = defineStore('chat', () => {
                   messages.value[idx] = {
                     id: thinkId, role: 'ai', sender: currentAgent.name,
                     time: new Date().toTimeString().slice(0, 5),
-                    content: accText, citations: [], actions: []
+                    content: accText, citations: [], actions: [], trace
                   }
                 } else {
                   messages.value[idx].content = accText
                 }
               }
+            } else if (eventType === 'plan' && trace) {
+              trace.plan = data
+              const idx = messages.value.findIndex(m => m.id === thinkId)
+              if (idx > -1) messages.value[idx].thinking = '正在制定执行计划…'
+            } else if (eventType === 'step_start' && trace) {
+              trace.steps.push({ ...data, status: 'running', summary: '' })
+              const idx = messages.value.findIndex(m => m.id === thinkId)
+              if (idx > -1) messages.value[idx].thinking = `正在执行：${data.action}…`
+            } else if (eventType === 'step_complete' && trace) {
+              const step = trace.steps.find(s => s.step_number === data.step_number)
+              if (step) Object.assign(step, data)
+              const idx = messages.value.findIndex(m => m.id === thinkId)
+              if (idx > -1) messages.value[idx].thinking = `步骤 ${data.step_number} 完成`
+            } else if (eventType === 'review' && trace) {
+              trace.reviews.push(data)
+            } else if (eventType === 'revision' && trace) {
+              trace.revision = data.revision
+              const idx = messages.value.findIndex(m => m.id === thinkId)
+              if (idx > -1 && !started) messages.value[idx].thinking = '正在根据评审意见重新规划…'
             } else if (eventType === 'error') {
               throw new Error(data.error)
             }
@@ -221,13 +326,14 @@ export const useChatStore = defineStore('chat', () => {
             id: thinkId, role: 'ai', sender: currentAgent.name,
             time: new Date().toTimeString().slice(0, 5),
             content: accText || '（本次未生成回答）',
-            citations: msgRefs, actions: []
+            citations: msgRefs, actions: [], trace
           }
         } else {
           messages.value[idx].citations = msgRefs
           messages.value[idx].actions = [
             { label: '追问', variant: 'green' }, { label: '复制' }, { label: '导出' }
           ]
+          messages.value[idx].trace = trace
         }
       }
     } catch (err) {
@@ -243,17 +349,18 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  function setCurrentAgent(agent) {
-    Object.assign(currentAgent, agent)
-  }
-
   onMounted(() => {
-    loadTasks()
+    loadAgents().then(() => {
+      resetMessages()
+      loadTasks()
+    })
   })
 
   return {
-    currentAgent, dataSources, taskHistory, messages, citations, loadingTasks,
+    currentAgent, availableAgents, loadingAgents,
+    dataSources, taskHistory, messages, citations, loadingTasks,
+    loadAgents, setCurrentAgent, resetMessages,
     loadTasks, createTask, activateTask, togglePinTask, deleteTask,
-    setActiveTask, toggleDataSource, sendMessage, setCurrentAgent
+    setActiveTask, toggleDataSource, sendMessage
   }
 })

@@ -139,6 +139,7 @@ class ChatTaskRepository:
         pinned: bool = False,
         agent_name: str | None = None,
         agent_icon: str | None = None,
+        agent_id: int | None = None,
     ) -> ChatTask:
         """创建任务.
 
@@ -149,6 +150,7 @@ class ChatTaskRepository:
             pinned: 是否置顶.
             agent_name: Agent 名称.
             agent_icon: Agent 图标.
+            agent_id: Agent ID.
 
         Returns:
             创建的任务.
@@ -160,6 +162,7 @@ class ChatTaskRepository:
             pinned=pinned,
             agent_name=agent_name,
             agent_icon=agent_icon,
+            agent_id=agent_id,
         )
         self.db.add(task)
         self.db.commit()
@@ -201,6 +204,7 @@ class ChatTaskRepository:
         pin: str | None = None,
         pinned: bool | None = None,
         active: bool | None = None,
+        agent_id: int | None = None,
     ) -> ChatTask | None:
         """更新任务.
 
@@ -211,6 +215,7 @@ class ChatTaskRepository:
             pin: 置顶标识.
             pinned: 是否置顶.
             active: 是否激活.
+            agent_id: Agent ID.
 
         Returns:
             更新后的任务或 None.
@@ -228,6 +233,8 @@ class ChatTaskRepository:
             task.pinned = pinned
         if active is not None:
             task.active = active
+        if agent_id is not None:
+            task.agent_id = agent_id
         self.db.commit()
         self.db.refresh(task)
         return task
@@ -301,6 +308,7 @@ class AgentRepository:
         self,
         *,
         name: str,
+        agent_type: str = "simple",
         icon: str,
         bg: str,
         color: str,
@@ -314,10 +322,16 @@ class AgentRepository:
         tag_cls: str | None,
         source: str,
         enabled: bool,
+        system_prompt: str | None = None,
+        default_top_k: int = 5,
+        retrieval_mode: str = "basic_rag",
+        industry_skill_id: str | None = None,
+        config: dict[str, object] | None = None,
     ) -> Agent:
         """创建 Agent."""
         agent = Agent(
             name=name,
+            agent_type=agent_type,
             icon=icon,
             bg=bg,
             color=color,
@@ -331,6 +345,11 @@ class AgentRepository:
             tag_cls=tag_cls,
             source=source,
             enabled=enabled,
+            system_prompt=system_prompt,
+            default_top_k=default_top_k,
+            retrieval_mode=retrieval_mode,
+            industry_skill_id=industry_skill_id,
+            config=config or {},
         )
         self.db.add(agent)
         self.db.commit()
@@ -390,6 +409,79 @@ class AgentRepository:
             .order_by(func.count(Agent.id).desc())
         )
         return self.db.execute(stmt).all()
+
+    def create_team_member(
+        self,
+        agent_id: int,
+        member_agent_id: int,
+        role: str,
+        step_template: dict[str, object] | None = None,
+        order_index: int = 0,
+    ) -> dict[str, object]:
+        """为复合 Agent 添加团队成员."""
+        from sqlalchemy import text
+
+        result = self.db.execute(
+            text(
+                """
+                INSERT INTO agent_team_members
+                  (agent_id, member_agent_id, role, step_template, order_index)
+                VALUES
+                  (:agent_id, :member_agent_id, :role, :step_template, :order_index)
+                RETURNING id, agent_id, member_agent_id, role, step_template, order_index
+                """
+            ),
+            {
+                "agent_id": agent_id,
+                "member_agent_id": member_agent_id,
+                "role": role,
+                "step_template": step_template or {},
+                "order_index": order_index,
+            },
+        ).mappings().first()
+        self.db.commit()
+        return dict(result) if result else {}
+
+    def list_team_members(self, agent_id: int) -> list[dict[str, object]]:
+        """列出复合 Agent 的团队成员."""
+        from sqlalchemy import text
+
+        rows = self.db.execute(
+            text(
+                """
+                SELECT
+                  m.id,
+                  m.agent_id,
+                  m.member_agent_id,
+                  a.name AS member_name,
+                  a.icon AS member_icon,
+                  a.system_prompt,
+                  a.skills,
+                  m.role,
+                  m.step_template,
+                  m.order_index
+                FROM agent_team_members m
+                JOIN agents a ON a.id = m.member_agent_id
+                WHERE m.agent_id = :agent_id
+                ORDER BY m.order_index, m.id
+                """
+            ),
+            {"agent_id": agent_id},
+        ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def delete_team_member(self, agent_id: int, member_id: int) -> bool:
+        """删除团队成员."""
+        from sqlalchemy import text
+
+        result = self.db.execute(
+            text(
+                "DELETE FROM agent_team_members WHERE agent_id = :agent_id AND id = :member_id"
+            ),
+            {"agent_id": agent_id, "member_id": member_id},
+        )
+        self.db.commit()
+        return result.rowcount > 0
 
     def update(
         self,
