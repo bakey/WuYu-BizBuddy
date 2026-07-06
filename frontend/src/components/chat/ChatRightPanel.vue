@@ -27,7 +27,7 @@ const midCitations  = () => chat.citations.filter(c => c.relevance === 'mid')
             :key="c.id"
             class="hist-item"
             style="cursor:pointer"
-            title="点击预览引用原文"
+            :title="c.path || c.title"
             @click="openPreview(c)"
           >
             <span class="hist-pin gr"></span>
@@ -44,7 +44,7 @@ const midCitations  = () => chat.citations.filter(c => c.relevance === 'mid')
             :key="c.id"
             class="hist-item"
             style="cursor:pointer"
-            title="点击预览引用原文"
+            :title="c.path || c.title"
             @click="openPreview(c)"
           >
             <span class="hist-pin"></span>

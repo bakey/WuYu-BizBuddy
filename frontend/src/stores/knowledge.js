@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed, markRaw } from 'vue'
+import { apiFetch } from '@/utils/api'
 
 // 模块级自增计数器：保证同一毫秒内并发上传也拿到唯一临时 id
 let _tempSeq = 0
@@ -85,7 +86,7 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
   // 启动时从后端加载文档列表，后端不可用时静默保留 mock 数据
   async function loadDatasets() {
     try {
-      const resp = await fetch('/api/v1/documents?limit=100')
+      const resp = await apiFetch('/documents?limit=100')
       if (!resp.ok) return
       const docs = await resp.json()
       if (!docs.length) return
@@ -150,7 +151,7 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
       found.progress = 60
       found.statusLabel = '上传中…'
 
-      const resp = await fetch('/api/v1/documents', {
+      const resp = await apiFetch('/documents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -175,7 +176,7 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
         entry.count = `${content.length} 字`
       } else {
         // 条目在上传期间被取消，但 POST 已落库 → 补偿删除孤儿文档
-        fetch(`/api/v1/documents/${doc.id}`, { method: 'DELETE' }).catch(() => {})
+        apiFetch(`/documents/${doc.id}`, { method: 'DELETE' }).catch(() => {})
       }
     } catch (err) {
       if (err && err.name === 'AbortError') return  // 用户取消，条目已移除
@@ -203,7 +204,7 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
 
     // 已就绪条目：调后端 DELETE
     try {
-      const resp = await fetch(`/api/v1/documents/${id}`, { method: 'DELETE' })
+      const resp = await apiFetch(`/documents/${id}`, { method: 'DELETE' })
       if (resp.ok || resp.status === 404) {  // 404 视为已删除（幂等）
         _spliceLocal(id)
         return true
@@ -228,7 +229,7 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
     retrieveLoading.value = true
     retrieveError.value = ''
     try {
-      const resp = await fetch('/api/v1/retrieve', {
+      const resp = await apiFetch('/retrieve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: q, top_k: retrieveTopK.value })

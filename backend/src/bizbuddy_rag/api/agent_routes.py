@@ -95,15 +95,21 @@ async def list_agents(
     category: str | None = None,
     source: str | None = None,
     search: str | None = None,
+    include_system: bool = False,
     db: Session = Depends(get_db),
 ) -> list[AgentOut]:
-    """列出 Agent."""
+    """列出 Agent。
+
+    默认排除 category='system' 的内部组件（composite Agent 的 orchestrator/worker/reviewer），
+    传 include_system=true 才返回全部（管理面板/系统巡检用）。
+    """
     repo = AgentRepository(db)
     agents = repo.list_agents(
         category=category,
         source=source,
         search=search,
         only_enabled=True,
+        include_system=include_system,
     )
     return [_agent_out(a) for a in agents]
 
@@ -204,11 +210,12 @@ async def delete_agent(
 
 @router.get("/stats/categories", response_model=list[AgentCategoryStat])
 async def category_stats(
+    include_system: bool = False,
     db: Session = Depends(get_db),
 ) -> list[AgentCategoryStat]:
-    """Agent 分类统计."""
+    """Agent 分类统计。默认不含 system 内部组件。"""
     repo = AgentRepository(db)
-    rows = repo.category_stats()
+    rows = repo.category_stats(include_system=include_system)
     return [AgentCategoryStat(label=row[0], count=row[1]) for row in rows]
 
 

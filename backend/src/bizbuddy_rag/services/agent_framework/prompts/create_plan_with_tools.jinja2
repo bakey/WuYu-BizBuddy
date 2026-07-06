@@ -1,0 +1,15 @@
+用户问题：{{ user_query }}
+
+可用 Worker 与 Skill 映射：
+{{ workers_json }}
+
+Reviewer 信息：{{ reviewer_text }}
+
+{{ revision_context }}
+
+请直接输出 function calls，每个 function call 代表一个执行步骤。
+要求：
+1. function name 必须是可用的 tool 名称。
+2. arguments 中的 query 字段应提取用户问题中的关键检索词。
+3. 如需 skill_id/policy_scope，请在 arguments 中提供。
+4. 如果问题涉及多个政策范围（national 国家级、local 地方级、standard 标准规范、case 案例），请多次调用 policy_search，每次指定不同的 policy_scope，确保各维度证据都被收集。

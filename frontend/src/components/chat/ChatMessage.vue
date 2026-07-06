@@ -76,16 +76,22 @@ async function onAction(label) {
       <span class="msg-time">{{ message.time }}</span>
     </div>
 
-    <!-- Thinking state -->
-    <div v-if="message.thinking" class="msg-bubble-ai" style="background:var(--info-light);border-color:#DBEAFE">
+    <!-- Thinking state: 只在还没有回答内容时显示；已经开始输出后就不再顶替内容气泡 -->
+    <div v-if="message.thinking && !message.content" class="msg-bubble-ai" style="background:var(--info-light);border-color:#DBEAFE">
       <div class="think-status" style="background:transparent;border:0;padding:0">
         <div class="think-dots"><span></span><span></span><span></span></div>
         {{ message.thinking }}
       </div>
     </div>
 
-    <!-- Execution trace: visible as soon as plan arrives, even while thinking -->
-    <div v-if="message.trace" class="execution-trace">
+    <!-- 意图为 chitchat 时，用一个轻量徽标替代 trace 面板；无需展示 plan/steps/reviews -->
+    <div v-if="message.trace && message.trace.intent === 'chitchat'" class="intent-badge">
+      <span class="intent-dot"></span>
+      识别为寒暄/元问题，跳过检索直接回答
+    </div>
+
+    <!-- Execution trace: 常规业务问题才展示完整轨迹面板 -->
+    <div v-else-if="message.trace" class="execution-trace">
       <div class="trace-toggle" @click="message._showTrace = !message._showTrace">
         <span class="trace-dot"></span>
         {{ message._showTrace ? '收起执行轨迹' : '查看执行轨迹' }}
@@ -106,11 +112,12 @@ async function onAction(label) {
           </div>
           <div
             v-for="step in message.trace.steps"
-            :key="step.step_number"
+            :key="step.key || step.step_number"
             class="trace-step"
             :class="{ failed: step.status === 'failed', running: step.status === 'running', pending: step.status === 'pending' }"
           >
             <span class="trace-step-num">#{{ step.step_number }}</span>
+            <span v-if="step.revision" class="trace-step-revision">第 {{ step.revision + 1 }} 轮</span>
             <span class="trace-step-action">{{ step.action }}</span>
             <span v-if="roleLabel(step.role, step.action)" class="trace-step-role">{{ roleLabel(step.role, step.action) }}</span>
             <span v-if="step.input?.policy_scope" class="trace-step-scope">{{ scopeLabel(step.input.policy_scope) }}</span>
@@ -138,13 +145,17 @@ async function onAction(label) {
       </div>
     </div>
 
-    <!-- Normal response -->
-    <div v-else class="msg-bubble-ai">
+    <!-- Answer content: 只要有内容就展示，不再依赖 trace/thinking 的 v-else -->
+    <div v-if="message.content" class="msg-bubble-ai">
       <div v-if="message.skillCall" class="skill-call">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
           <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
         </svg>
         {{ message.skillCall }}
+      </div>
+      <div v-if="message.phaseStatus" class="phase-status">
+        <span class="phase-spinner"></span>
+        {{ message.phaseStatus }}
       </div>
       <div v-html="message.content"></div>
       <div v-if="message.citations?.length" class="citations">
@@ -285,6 +296,42 @@ async function onAction(label) {
   border-radius: 10px;
   background: #FFF7E6;
   color: #FA8C16;
+}
+.trace-step-revision {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: #FFF0F6;
+  color: #EB2F96;
+}
+.intent-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 12px; margin-top: 4px;
+  font-size: 11px; color: #722ED1;
+  background: #F9F0FF; border: 1px solid #EFDBFF; border-radius: 12px;
+  align-self: flex-start;
+}
+.intent-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: #722ED1;
+}
+.phase-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #1890FF;
+  background: #E6F7FF;
+  border: 1px solid #91D5FF;
+  border-radius: 12px;
+  padding: 3px 10px;
+  margin-bottom: 8px;
+}
+.phase-spinner {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #1890FF;
+  animation: pulse 1.2s ease-in-out infinite;
 }
 .trace-step-status {
   font-size: 10px;

@@ -80,6 +80,8 @@ class IndustryKnowledgeQueryService:
         query: str,
         # 可选的返回片段数量；为空则使用技能或系统默认值。
         top_k: int | None = None,
+        # 可选的预计算 query 向量；同一次多路检索复用，避免重复 bge-m3 推理。
+        query_vector: list[float] | None = None,
     ) -> IndustryKnowledgeRetrieveResponse:
         # 方法说明：只检索证据片段，不调用大模型。
         """Retrieve evidence chunks for one enabled skill."""
@@ -88,7 +90,9 @@ class IndustryKnowledgeQueryService:
         # 计算最终使用的 top_k，并限制在系统允许范围内。
         resolved_top_k = self._resolve_top_k(top_k, skill)
         # 从知识库中检索匹配片段。
-        segments = self._retrieve_segments(skill, query, resolved_top_k)
+        segments = self._retrieve_segments(
+            skill, query, resolved_top_k, query_vector=query_vector
+        )
         # 把内部片段结构转换成接口返回的引用模型。
         references = [self._to_reference(segment) for segment in segments]
         return IndustryKnowledgeRetrieveResponse(
@@ -291,6 +295,9 @@ class IndustryKnowledgeQueryService:
         query: str,
         # 要检索的片段数量。
         top_k: int,
+        *,
+        # 可选的预计算 query 向量：同一次执行内多路检索复用，省 bge-m3 推理。
+        query_vector: list[float] | None = None,
     ) -> list[IndustryKnowledgeSegment]:
         # 全文检索：在业务库 public.datasets_segments 上做中文全文检索。
         if skill.retrieval_mode == "fulltext":
@@ -303,8 +310,8 @@ class IndustryKnowledgeQueryService:
             if self.embedding_service is None:
                 # 向量模式必须注入 embedding 服务。
                 raise RAGException("Vector retrieval requires an embedding service")
-            # 把用户问题编码成 query 向量，并格式化成 pgvector 字面量。
-            vector = self.embedding_service.embed_query(query)
+            # 优先复用外部预计算的 query 向量；未提供才本地推理。
+            vector = query_vector if query_vector is not None else self.embedding_service.embed_query(query)
             query_vector_literal = self.embedding_service.to_pgvector_literal(vector)
             # probes 优先用 skill 配置，其次系统默认。
             probes = skill.ivfflat_probes or settings.industry_vector_probes

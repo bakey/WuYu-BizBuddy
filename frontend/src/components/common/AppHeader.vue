@@ -1,12 +1,45 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useAppStore } from '@/stores/app'
+import { useUserStore } from '@/stores/user'
 
 const appStore = useAppStore()
+const userStore = useUserStore()
 
 const beLabel = computed(() => ({
   checking: '检测中', online: '后端在线', offline: '后端离线'
 }[appStore.backendStatus] || ''))
+
+// 头像文字：优先昵称首字，其次用户名首字。
+// 直接对 code point 切片，避免中文首字被英文 toUpperCase 处理成奇怪的字符。
+const avatarChar = computed(() => {
+  const s = userStore.displayName || ''
+  return s ? [...s][0].toUpperCase() : '?'
+})
+
+const menuOpen = ref(false)
+const menuRef = ref(null)
+
+function toggleMenu() { menuOpen.value = !menuOpen.value }
+function closeMenu() { menuOpen.value = false }
+function onLogout() { closeMenu(); userStore.logout() }
+
+function onDocClick(e) {
+  if (!menuOpen.value) return
+  if (menuRef.value && !menuRef.value.contains(e.target)) closeMenu()
+}
+function onDocKey(e) {
+  if (e.key === 'Escape') closeMenu()
+}
+
+onMounted(() => {
+  document.addEventListener('click', onDocClick)
+  document.addEventListener('keydown', onDocKey)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onDocClick)
+  document.removeEventListener('keydown', onDocKey)
+})
 
 const TABS = [
   { key: 'chat',  label: '智能问答', badge: null },
@@ -65,7 +98,32 @@ const TABS = [
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
         </svg>
       </button>
-      <button class="avatar-btn">吴</button>
+      <div ref="menuRef" class="user-menu">
+        <button
+          class="avatar-btn user-trigger"
+          :class="{ open: menuOpen }"
+          :title="userStore.displayName"
+          @click.stop="toggleMenu"
+        >{{ avatarChar }}</button>
+        <div v-if="menuOpen" class="user-dropdown">
+          <div class="user-dropdown-header">
+            <span class="user-dd-avatar">{{ avatarChar }}</span>
+            <div class="user-dropdown-meta">
+              <div class="user-dropdown-name">{{ userStore.displayName }}</div>
+              <div v-if="userStore.user?.email" class="user-dropdown-sub">{{ userStore.user.email }}</div>
+              <div v-else-if="userStore.user?.username" class="user-dropdown-sub">@{{ userStore.user.username }}</div>
+            </div>
+          </div>
+          <button class="user-dropdown-btn" @click.stop="onLogout">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+              <polyline points="16 17 21 12 16 7"/>
+              <line x1="21" y1="12" x2="9" y2="12"/>
+            </svg>
+            退出登录
+          </button>
+        </div>
+      </div>
     </div>
   </header>
 </template>
@@ -83,4 +141,48 @@ const TABS = [
 .be-status.offline { background: var(--danger-light); border-color: #FCA5A5; color: var(--danger); }
 .be-status.offline .be-dot { background: var(--danger); }
 .be-status.checking .be-dot { background: var(--warn); }
+.user-menu { position: relative; }
+.user-trigger {
+  transition: box-shadow 120ms ease, transform 120ms ease;
+}
+.user-trigger:hover, .user-trigger.open {
+  box-shadow: 0 0 0 3px rgba(16,185,129,0.25);
+  transform: translateY(-1px);
+}
+.user-dd-avatar {
+  width: 36px; height: 36px; border-radius: 50%;
+  display: inline-grid; place-items: center;
+  background: linear-gradient(135deg, #10B981, #059669); color: #fff;
+  font-size: 15px; font-weight: 700; flex-shrink: 0;
+  box-shadow: 0 2px 4px rgba(5,150,105,.3);
+}
+.user-dropdown {
+  position: absolute; right: 0; top: calc(100% + 8px); z-index: 1000;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  min-width: 220px; padding: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.1);
+}
+.user-dropdown-header {
+  display: flex; align-items: center; gap: 10px;
+  padding-bottom: 10px; margin-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.user-dropdown-meta { min-width: 0; flex: 1; }
+.user-dropdown-name {
+  font-size: 13px; font-weight: 600; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.user-dropdown-sub {
+  font-size: 11px; color: var(--ink4); margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.user-dropdown-btn {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  width: 100%; padding: 8px 0; font-size: 12px; font-weight: 600;
+  border-radius: 8px; border: 1px solid var(--line); background: var(--surface2);
+  color: var(--ink2); cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.user-dropdown-btn:hover {
+  background: var(--danger-light); color: var(--danger); border-color: #FCA5A5;
+}
 </style>

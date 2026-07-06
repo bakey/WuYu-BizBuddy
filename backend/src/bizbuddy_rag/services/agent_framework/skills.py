@@ -81,7 +81,12 @@ class BasicRAGSkill(Skill):
 
 
 class IndustryKnowledgeSkillAdapter(Skill):
-    """基于行业知识库 gufei_vec 的 Skill."""
+    """基于行业知识库 gufei_vec 的 Skill.
+
+    仅做检索，不在内部再调一次 LLM 生成小结（那次 LLM 输出对
+    Composite Agent 的最终合成没有价值，只会成倍拉高时延）。
+    最终答案由 executor 汇总所有 Worker 引用后统一调 LLM 生成。
+    """
 
     name = "industry_knowledge"
 
@@ -96,6 +101,8 @@ class IndustryKnowledgeSkillAdapter(Skill):
         vector_db: Session | None = context.get("vector_db")
         skill_id_raw = context.get("skill_id")
         top_k = context.get("top_k", 5)
+        # 允许 executor 预计算 query 向量并注入，避免多 Worker 重复 embed。
+        query_vector = context.get("_query_vector")
         if skill_id_raw is None:
             return SkillResult(
                 skill_name=self.name,
@@ -105,18 +112,19 @@ class IndustryKnowledgeSkillAdapter(Skill):
         try:
             service = IndustryKnowledgeQueryService(
                 repository=IndustryKnowledgeRepository(db, vector_db=vector_db),
-                llm_service=LLMService(),
+                llm_service=None,
                 embedding_service=self.embedding_service,
                 reranker_service=self.reranker_service,
             )
-            result = await service.answer(
+            result = service.retrieve(
                 skill_id=UUID(str(skill_id_raw)),
                 query=query,
                 top_k=top_k,
+                query_vector=query_vector,
             )
             content = "\n\n".join(
                 f"[{i + 1}] {ref.content}"
-                for i, ref in enumerate(result.references)
+                for i, ref in enumerate(result.items)
             )
             return SkillResult(
                 skill_name=self.name,
@@ -129,11 +137,10 @@ class IndustryKnowledgeSkillAdapter(Skill):
                         "score": ref.score,
                         "metadata": ref.metadata,
                     }
-                    for ref in result.references
+                    for ref in result.items
                 ],
                 metadata={
-                    "query_log_id": str(result.query_log_id),
-                    "retrieved_count": len(result.references),
+                    "retrieved_count": len(result.items),
                 },
             )
         except Exception as exc:

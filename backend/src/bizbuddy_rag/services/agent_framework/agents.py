@@ -1,6 +1,7 @@
 """Agent 角色实现：Orchestrator、Worker、Reviewer."""
 
 import json
+import re
 from typing import Any
 
 from bizbuddy_rag.config import settings
@@ -10,8 +11,38 @@ from bizbuddy_rag.services.agent_framework.models import (
     ReviewResult,
     SkillResult,
 )
+from bizbuddy_rag.services.agent_framework.prompts import render
 from bizbuddy_rag.services.agent_framework.skill_registry import SkillRegistry
 from bizbuddy_rag.services.llm import LLMService
+
+
+# 规则级 chitchat 短路：只匹配显然的"整句寒暄"，命中即绕过 Orchestrator LLM。
+# 每条模式都要求"整句匹配"（^...$），且叠加长度上限，避免"你好，帮我查xxx"这类
+# 复合意图被误伤 —— 复合句仍进 Orchestrator 由 LLM 决策。
+_CHITCHAT_PATTERNS = [
+    # 招呼
+    r"^\s*(你好|您好|hi|hello|hey|嗨|哈喽|哈啰)[\s!！。.~]*$",
+    r"^\s*(早上好|下午好|晚上好|早安|晚安|早)[\s!！。.~]*$",
+    r"^\s*(在吗|在么|在不在|有人吗|有人么)[\s?？!！。.~]*$",
+    # 自我介绍 / 能力问询
+    r"^\s*(你是谁|你叫什么|你叫啥|你是什么|你能做什么|你会什么|你会做什么|你是干嘛的)[\s?？!！。.~]*$",
+    r"^\s*(介绍一下|自我介绍|介绍你自己|做个自我介绍)[\s?？!！。.~]*$",
+    # 致谢 / 告别 / 应答
+    r"^\s*(谢谢|感谢|多谢|thanks|thank you|3q|3Q)[\s!！。.~]*$",
+    r"^\s*(再见|拜拜|bye|goodbye|拜)[\s!！。.~]*$",
+    r"^\s*(好的|好|可以|行|没问题|不用了|算了|嗯|嗯嗯|OK|ok)[\s!！。.~]*$",
+]
+
+
+def rule_based_intent(query: str) -> str | None:
+    """规则级意图分类。命中返回 chitchat，否则返回 None 交给 LLM。"""
+    q = (query or "").strip()
+    if not q or len(q) > 20:
+        return None
+    for p in _CHITCHAT_PATTERNS:
+        if re.match(p, q, re.IGNORECASE):
+            return "chitchat"
+    return None
 
 
 class BaseAgent:
@@ -65,37 +96,14 @@ class OrchestratorAgent(BaseAgent):
                 "请根据反馈修订计划，重点修复被指出的缺陷。"
             )
 
-        prompt = f"""你是 {self.name}，负责理解用户意图并制定执行计划。
-
-用户问题：{user_query}
-
-可用 Worker：
-{worker_descriptions}
-
-Reviewer 信息：{reviewer or '无'}
-
-{revision_context}
-
-请输出一个 JSON 对象，格式如下：
-{{
-  "reasoning": "对用户意图和计划思路的简短说明",
-  "expected_output": "计划完成后应产生的输出描述",
-  "steps": [
-    {{
-      "step_number": 1,
-      "member_agent_id": <worker_id>,
-      "action": "basic_rag|industry_knowledge|policy_search|...",
-      "input": {{"top_k": 5, "skill_id": "...", "policy_scope": "..."}},
-      "reason": "为什么需要这一步"
-    }}
-  ]
-}}
-
-要求：
-1. steps 中的 action 必须是已注册的 skill 名称。
-2. input 中需要 skill_id 的 action（industry_knowledge / policy_search）必须提供 skill_id。
-3. 如果问题明确指向某个政策范围，请在 input 中设置 policy_scope（national/local/standard/case）。
-4. 只输出 JSON，不要有任何额外说明。"""
+        prompt = render(
+            "create_plan.jinja2",
+            agent_name=self.name,
+            user_query=user_query,
+            worker_descriptions=worker_descriptions,
+            reviewer_text=reviewer or "无",
+            revision_context=revision_context,
+        )
 
         response = await self._chat(prompt, "", self.system_prompt)
         try:
@@ -187,34 +195,22 @@ Reviewer 信息：{reviewer or '无'}
             if action:
                 worker_by_scope[(action, scope)] = w["id"]
 
-        system_prompt = (
-            f"你是 {self.name}，负责理解用户意图并制定执行计划。"
-            "你会被提供一组 tools，每个 tool 对应一个 Worker。"
-            "请根据用户问题，选择一个或多个 tool 调用，生成执行步骤。"
-            "如果问题需要多个维度分析（如国家、地方、标准、案例），请为每个维度分别调用一次对应 tool，"
-            "并为 policy_search 传入不同的 policy_scope。"
+        system_prompt = render(
+            "create_plan_with_tools_system.jinja2",
+            agent_name=self.name,
         )
 
-        prompt = f"""用户问题：{user_query}
-
-可用 Worker 与 Skill 映射：
-{json.dumps(
-    {w['id']: {"name": w['name'], "template": w.get('step_template', {})} for w in workers},
-    ensure_ascii=False,
-    indent=2,
-)}
-
-Reviewer 信息：{reviewer or '无'}
-
-{revision_context}
-
-请直接输出 function calls，每个 function call 代表一个执行步骤。
-要求：
-1. function name 必须是可用的 tool 名称。
-2. arguments 中的 query 字段应提取用户问题中的关键检索词。
-3. 如需 skill_id/policy_scope，请在 arguments 中提供。
-4. 如果问题涉及多个政策范围（national 国家级、local 地方级、standard 标准规范、case 案例），
-   请多次调用 policy_search，每次指定不同的 policy_scope，确保各维度证据都被收集。"""
+        prompt = render(
+            "create_plan_with_tools.jinja2",
+            user_query=user_query,
+            workers_json=json.dumps(
+                {w['id']: {"name": w['name'], "template": w.get('step_template', {})} for w in workers},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            reviewer_text=reviewer or "无",
+            revision_context=revision_context,
+        )
 
         message = await self.llm.chat_with_tools(
             prompt=prompt,
@@ -241,9 +237,15 @@ Reviewer 信息：{reviewer or '无'}
                     expected_output="基于各维度证据的综合政策解读",
                     reasoning="mock 模式下使用默认计划：并行调用所有可用 worker",
                 )
-            # 没有 tool calls 时 fallback 到普通 JSON 模式
-            return await self.create_plan(
-                user_query, workers, reviewer, previous_feedback, previous_plan
+            # LLM 明确选择不调用任何工具（tool_choice=auto 允许 no-op）→
+            # 视为 chitchat / 元问题意图，返回空计划让 executor 直接生成回答。
+            # 关键：不再 fallback 到 create_plan（JSON 模式），否则一定会构造一个"调所有 worker"的默认计划。
+            content = message.get("content") or ""
+            return AgentPlan(
+                steps=[],
+                expected_output=content,
+                reasoning="识别为寒暄/元问题，无需调用检索工具",
+                intent="chitchat",
             )
 
         steps: list[PlanStep] = []
@@ -387,30 +389,14 @@ class ReviewerAgent(BaseAgent):
             for out in worker_outputs
         )
 
-        prompt = f"""你是 {self.name}，负责评审 Agent 团队对用户问题的回答质量。
-
-用户问题：{user_query}
-
-执行计划：
-{json.dumps(plan.to_dict(), ensure_ascii=False, indent=2)}
-
-各 Worker 输出摘要：
-{outputs_summary}
-
-当前草稿回答：
-{draft_answer}
-
-请输出 JSON：
-{{
-  "verdict": "pass" 或 "revise",
-  "feedback": "评审意见，如果要求修订请明确指出缺陷和如何修改",
-  "defects": ["缺陷1", "缺陷2"]
-}}
-
-要求：
-1. 若回答充分、引用可靠、覆盖用户问题的各个维度，请返回 pass。
-2. 若存在遗漏、引用不足、逻辑错误或偏离用户问题，请返回 revise 并给出具体缺陷。
-3. 只输出 JSON，不要有任何额外说明。"""
+        prompt = render(
+            "review.jinja2",
+            agent_name=self.name,
+            user_query=user_query,
+            plan_json=json.dumps(plan.to_dict(), ensure_ascii=False, indent=2),
+            outputs_summary=outputs_summary,
+            draft_answer=draft_answer,
+        )
 
         response = await self._chat(prompt, "", self.system_prompt)
         try:

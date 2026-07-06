@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
 import { onMounted, ref, reactive, computed } from 'vue'
+import { apiFetch, apiJson, redirectToLogin } from '@/utils/api'
+import { basename } from '@/utils/path'
 
 const DEFAULT_AGENT = {
   id: null,
@@ -44,17 +46,7 @@ export const useChatStore = defineStore('chat', () => {
     }
   })
 
-  async function api(path, options = {}) {
-    const resp = await fetch(`/api/v1${path}`, {
-      headers: { 'Content-Type': 'application/json', ...options.headers },
-      ...options
-    })
-    if (!resp.ok) {
-      const text = await resp.text()
-      throw new Error(`HTTP ${resp.status}: ${text}`)
-    }
-    return resp.status === 204 ? null : resp.json()
-  }
+  const api = apiJson
 
   function _mapAgent(a) {
     return {
@@ -220,11 +212,12 @@ export const useChatStore = defineStore('chat', () => {
 
     try {
       const isComposite = currentAgent.agentType === 'composite'
+      // 用相对路径，apiFetch 会自动拼上 Vite base + /api/v1（同源同域，cookie 自然带）。
       const endpoint = isComposite
-        ? `/api/v1/agents/${currentAgent.id}/execute/stream`
-        : `/api/v1/agents/${currentAgent.id}/query/stream`
+        ? `/agents/${currentAgent.id}/execute/stream`
+        : `/agents/${currentAgent.id}/query/stream`
 
-      const resp = await fetch(endpoint, {
+      const resp = await apiFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: text, top_k: currentAgent.defaultTopK || 5 })
@@ -242,6 +235,9 @@ export const useChatStore = defineStore('chat', () => {
       let trace = isComposite
         ? { plan: null, steps: [], reviews: [], revision: 0 }
         : null
+
+      // (revision, step_number) 作为步骤唯一 key，避免多轮 revision 之间互相覆盖。
+      const stepKey = (revision, stepNumber) => `${revision ?? 0}#${stepNumber}`
 
       while (true) {
         const { value, done } = await reader.read()
@@ -262,22 +258,31 @@ export const useChatStore = defineStore('chat', () => {
             const data = JSON.parse(raw)
 
             if (eventType === 'references') {
-              msgRefs = data.map((r, i) => ({
-                num: i + 1,
-                label: r.source || `引用 ${i + 1}`,
-                source: r.source || `引用 ${i + 1}`,
-                content: r.content || '',
-                score: r.score
-              }))
-              citations.value = data.map((r, i) => ({
-                id: i + 1,
-                title: r.source || `文档片段 ${i + 1}`,
-                meta: `[${i + 1}] 相似度 ${(r.score * 100).toFixed(0)}%`,
-                relevance: r.score >= 0.85 ? 'high' : 'mid',
-                source: r.source || `文档片段 ${i + 1}`,
-                content: r.content || '',
-                score: r.score
-              }))
+              // 展示只用文件名，完整路径存 path 字段供 tooltip 使用
+              msgRefs = data.map((r, i) => {
+                const name = basename(r.source) || `引用 ${i + 1}`
+                return {
+                  num: i + 1,
+                  label: name,
+                  source: name,
+                  path: r.source || '',
+                  content: r.content || '',
+                  score: r.score
+                }
+              })
+              citations.value = data.map((r, i) => {
+                const name = basename(r.source) || `文档片段 ${i + 1}`
+                return {
+                  id: i + 1,
+                  title: name,
+                  meta: `[${i + 1}] 相似度 ${(r.score * 100).toFixed(0)}%`,
+                  relevance: r.score >= 0.85 ? 'high' : 'mid',
+                  source: name,
+                  path: r.source || '',
+                  content: r.content || '',
+                  score: r.score
+                }
+              })
             } else if (eventType === 'delta') {
               accText += data.delta
               const idx = messages.value.findIndex(m => m.id === thinkId)
@@ -297,9 +302,14 @@ export const useChatStore = defineStore('chat', () => {
               }
             } else if (eventType === 'plan' && trace) {
               trace.plan = data
-              // 预初始化所有步骤，便于立即展示完整计划
-              trace.steps = (data.steps || []).map(s => ({
+              trace.revision = data.revision ?? 0
+              // 意图分流：LLM/规则识别为寒暄时打上标记，前端不再展示 trace 面板细节
+              if (data.intent && !trace.intent) trace.intent = data.intent
+              // 追加当前 revision 的步骤；旧 revision 步骤保留在轨迹中。
+              const incoming = (data.steps || []).map(s => ({
+                key: stepKey(s.revision ?? data.revision ?? 0, s.step_number),
                 step_number: s.step_number,
+                revision: s.revision ?? data.revision ?? 0,
                 role: s.role || 'worker',
                 action: s.action,
                 reason: s.reason,
@@ -308,36 +318,76 @@ export const useChatStore = defineStore('chat', () => {
                 summary: '',
                 elapsed_ms: null
               }))
+              const existingKeys = new Set(trace.steps.map(s => s.key))
+              for (const s of incoming) {
+                if (!existingKeys.has(s.key)) trace.steps.push(s)
+              }
               const idx = messages.value.findIndex(m => m.id === thinkId)
               if (idx > -1) {
-                // 立即把 trace 挂到消息上并默认展开，让 Plan 先输出、再执行
                 messages.value[idx] = {
                   ...messages.value[idx],
-                  thinking: `已生成执行计划，共 ${(data.steps || []).length} 步`,
+                  thinking: trace.revision > 0
+                    ? `已生成第 ${trace.revision + 1} 轮计划，共 ${incoming.length} 步`
+                    : `已生成执行计划，共 ${incoming.length} 步`,
                   trace,
                   _showTrace: true
                 }
               }
             } else if (eventType === 'step_start' && trace) {
-              const step = trace.steps.find(s => s.step_number === data.step_number)
+              const key = stepKey(data.revision, data.step_number)
+              const step = trace.steps.find(s => s.key === key)
+              const patch = { ...data, key, status: 'running', revision: data.revision ?? 0 }
               if (step) {
-                Object.assign(step, { ...data, status: 'running' })
+                Object.assign(step, patch)
               } else {
-                trace.steps.push({ ...data, status: 'running', summary: '' })
+                trace.steps.push({ summary: '', elapsed_ms: null, ...patch })
               }
+              // 首个 delta 前，把当前动作反映到 thinking；之后 thinking 已被替换成内容气泡，
+              // 步骤状态改由 trace 面板里的 pulse 高亮呈现，不再回填到 thinking 遮住答案。
               const idx = messages.value.findIndex(m => m.id === thinkId)
-              if (idx > -1) messages.value[idx].thinking = `正在执行第 ${data.step_number} 步：${data.action}…`
+              if (idx > -1 && !started) {
+                messages.value[idx].thinking = `正在执行第 ${data.step_number} 步：${data.action}…`
+              }
             } else if (eventType === 'step_complete' && trace) {
-              const step = trace.steps.find(s => s.step_number === data.step_number)
+              const key = stepKey(data.revision, data.step_number)
+              const step = trace.steps.find(s => s.key === key)
               if (step) Object.assign(step, data)
               const idx = messages.value.findIndex(m => m.id === thinkId)
-              if (idx > -1) messages.value[idx].thinking = `第 ${data.step_number} 步完成`
+              if (idx > -1 && !started) {
+                messages.value[idx].thinking = `第 ${data.step_number} 步完成`
+              }
             } else if (eventType === 'review' && trace) {
               trace.reviews.push(data)
             } else if (eventType === 'revision' && trace) {
               trace.revision = data.revision
               const idx = messages.value.findIndex(m => m.id === thinkId)
-              if (idx > -1 && !started) messages.value[idx].thinking = '正在根据评审意见重新规划…'
+              if (idx > -1 && !started) {
+                messages.value[idx].thinking = '正在根据评审意见重新规划…'
+              }
+            } else if (eventType === 'answer_html') {
+              // 后端把最终答案的 HTML 美化版发过来，直接覆盖前面流式累积的 raw 内容。
+              const idx = messages.value.findIndex(m => m.id === thinkId)
+              if (idx > -1 && data.html) {
+                messages.value[idx].content = data.html
+              }
+            } else if (eventType === 'answer_reset') {
+              // 新一轮 revision 开始起草回答前，清空上一轮的 delta 累积。
+              accText = ''
+              const idx = messages.value.findIndex(m => m.id === thinkId)
+              if (idx > -1 && started) {
+                messages.value[idx].content = ''
+              }
+            } else if (eventType === 'phase') {
+              // 阶段提示：起草前显示在 thinking 气泡；起草后作为轻量状态条挂在消息上，
+              // 不会遮盖已经输出的答案。
+              const idx = messages.value.findIndex(m => m.id === thinkId)
+              if (idx > -1) {
+                if (!started) {
+                  messages.value[idx].thinking = data.message || ''
+                } else {
+                  messages.value[idx].phaseStatus = data.message || ''
+                }
+              }
             } else if (eventType === 'error') {
               throw new Error(data.error)
             }
@@ -362,6 +412,7 @@ export const useChatStore = defineStore('chat', () => {
             { label: '追问', variant: 'green' }, { label: '复制' }, { label: '导出' }
           ]
           messages.value[idx].trace = trace
+          messages.value[idx].phaseStatus = ''
         }
       }
     } catch (err) {

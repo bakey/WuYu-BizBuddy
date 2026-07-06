@@ -83,6 +83,10 @@ class AgentPlan:
     steps: list[PlanStep]
     expected_output: str = ""
     reasoning: str = ""
+    # 意图类型：
+    #   task    —— 常规业务问题，走 Worker → Reviewer 全链路
+    #   chitchat —— 寒暄/自我介绍/致谢等，跳过 Worker 直接回答
+    intent: str = "task"
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为字典."""
@@ -90,6 +94,7 @@ class AgentPlan:
             "steps": [step.to_dict() for step in self.steps],
             "expected_output": self.expected_output,
             "reasoning": self.reasoning,
+            "intent": self.intent,
         }
 
 

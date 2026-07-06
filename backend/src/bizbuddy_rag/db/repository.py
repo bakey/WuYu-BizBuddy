@@ -429,12 +429,20 @@ class AgentRepository:
         source: str | None = None,
         search: str | None = None,
         only_enabled: bool = True,
+        include_system: bool = False,
         limit: int = 200,
     ) -> Sequence[Agent]:
-        """列出 Agent，支持分类、来源、搜索筛选."""
+        """列出 Agent，支持分类、来源、搜索筛选。
+
+        include_system=False 时默认过滤 category='system' 的内部组件
+        （orchestrator/worker/reviewer 等 composite 团队成员），
+        避免它们出现在用户可选的 Agent 列表里。
+        """
         stmt = select(Agent)
         if only_enabled:
             stmt = stmt.where(Agent.enabled.is_(True))
+        if not include_system:
+            stmt = stmt.where(Agent.category != "system")
         if category:
             stmt = stmt.where(Agent.category == category)
         if source:
@@ -448,16 +456,17 @@ class AgentRepository:
         stmt = stmt.limit(limit)
         return self.db.execute(stmt).scalars().all()
 
-    def category_stats(self) -> Sequence[tuple[str, int]]:
-        """按分类统计 Agent 数量."""
+    def category_stats(self, *, include_system: bool = False) -> Sequence[tuple[str, int]]:
+        """按分类统计 Agent 数量（默认排除 system 内部组件）。"""
         from sqlalchemy import func
 
         stmt = (
             select(Agent.category, func.count(Agent.id))
             .where(Agent.enabled.is_(True))
-            .group_by(Agent.category)
-            .order_by(func.count(Agent.id).desc())
         )
+        if not include_system:
+            stmt = stmt.where(Agent.category != "system")
+        stmt = stmt.group_by(Agent.category).order_by(func.count(Agent.id).desc())
         return self.db.execute(stmt).all()
 
     def source_stats(self) -> Sequence[tuple[str, int]]:

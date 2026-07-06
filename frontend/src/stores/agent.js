@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed, onMounted } from 'vue'
+import { apiJson } from '@/utils/api'
 
 const CATEGORY_META = [
   { key: '全部', icon: '📦', disabled: false },
@@ -30,17 +31,7 @@ export const useAgentStore = defineStore('agent', () => {
     { name: 'DeepResearch', icon: '🔬', uses: 3 }
   ])
 
-  async function api(path, options = {}) {
-    const resp = await fetch(`/api/v1${path}`, {
-      headers: { 'Content-Type': 'application/json', ...options.headers },
-      ...options
-    })
-    if (!resp.ok) {
-      const text = await resp.text()
-      throw new Error(`HTTP ${resp.status}: ${text}`)
-    }
-    return resp.status === 204 ? null : resp.json()
-  }
+  const api = apiJson
 
   function _mapAgent(a) {
     return {
