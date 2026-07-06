@@ -104,11 +104,64 @@ export const useIndustryKnowledgeStore = defineStore('industryKnowledge', () => 
     }
   }
 
+  // ── 检索测试（POST /api/v1/industry-knowledge/retrieve，只检索证据片段、不调 LLM）──
+  const ikRetrieveQuery   = ref('')
+  const ikRetrieveTopK    = ref(5)
+  const ikRetrieveResults = ref([])
+  const ikRetrieveLoading = ref(false)
+  const ikRetrieveError   = ref('')
+  const ikRetrieveDone    = ref(false)   // 已执行过一次，用于区分「未检索」与「无结果」
+
+  async function runIkRetrieve() {
+    const q = ikRetrieveQuery.value.trim()
+    const skillId = ikSkillId.value.trim()
+    if (!q || ikRetrieveLoading.value) return
+    if (!skillId) {
+      ikRetrieveError.value = '请先填写 skill_id'
+      ikRetrieveDone.value = true
+      return
+    }
+    if (!UUID_RE.test(skillId)) {
+      ikRetrieveError.value = 'skill_id 不是合法 UUID'
+      ikRetrieveDone.value = true
+      return
+    }
+    ikRetrieveLoading.value = true
+    ikRetrieveError.value = ''
+    try {
+      const resp = await fetch('/api/v1/industry-knowledge/retrieve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skill_id: skillId, query: q, top_k: ikRetrieveTopK.value })
+      })
+      if (!resp.ok) {
+        // 与 runQuery 同构：业务错误（skill 不存在/未启用等）走 400 JSON {detail}
+        let msg = `HTTP ${resp.status}`
+        try {
+          const e = await resp.json()
+          if (e && e.detail) msg = typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail)
+        } catch (_) { /* 非 JSON 错误体，沿用 HTTP 状态 */ }
+        throw new Error(msg)
+      }
+      const data = await resp.json()
+      ikRetrieveResults.value = Array.isArray(data.items) ? data.items : []
+    } catch (err) {
+      ikRetrieveError.value = err.message || '检索失败'
+      ikRetrieveResults.value = []
+    } finally {
+      ikRetrieveDone.value = true
+      ikRetrieveLoading.value = false
+    }
+  }
+
   return {
     ikSkillId, ikQuery, ikTopK,
     ikAnswer, ikReferences, ikQueryLogId,
     ikLoading, ikError, ikDone,
     ikFeedback, ikFeedbackSubmitting,
-    runQuery, submitFeedback
+    runQuery, submitFeedback,
+    ikRetrieveQuery, ikRetrieveTopK, ikRetrieveResults,
+    ikRetrieveLoading, ikRetrieveError, ikRetrieveDone,
+    runIkRetrieve
   }
 })
