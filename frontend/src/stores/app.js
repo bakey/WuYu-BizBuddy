@@ -15,7 +15,9 @@ export const useAppStore = defineStore('app', () => {
     if (inFlight) return            // 防止 30s tick 与上一次未完成请求叠加并发
     inFlight = true
     try {
-      const resp = await fetch('/api/v1/health', {
+      // health 免鉴权，但 URL 需要带上 Vite base（部署在 /bizbuddy/ 子路径下）。
+      const base = (import.meta.env.BASE_URL || '/').replace(/\/+$/, '')
+      const resp = await fetch(`${base}/api/v1/health`, {
         cache: 'no-store',
         signal: AbortSignal.timeout(5000),   // 后端半开/挂起时落定为 offline，而非永久卡在 checking
       })

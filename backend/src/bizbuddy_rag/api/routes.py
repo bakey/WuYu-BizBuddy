@@ -8,9 +8,6 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from bizbuddy_rag import __version__
-from bizbuddy_rag.api.industry_knowledge_routes import (
-    router as industry_knowledge_router,
-)
 from bizbuddy_rag.db import SessionLocal, init_db
 from bizbuddy_rag.db.repository import DocumentRepository
 from bizbuddy_rag.models import (
@@ -25,8 +22,10 @@ from bizbuddy_rag.models import (
 from bizbuddy_rag.services import EmbeddingService, LLMService, RAGService
 from bizbuddy_rag.utils.exceptions import RAGException
 
+# 免鉴权路由：仅健康检查，供容器 healthcheck 使用。
+public_router = APIRouter()
+# 需鉴权路由：documents / retrieve / query 等业务接口。
 router = APIRouter()
-router.include_router(industry_knowledge_router)
 
 
 @asynccontextmanager
@@ -53,9 +52,9 @@ def get_rag_service() -> RAGService:
     )
 
 
-@router.get("/health", response_model=HealthResponse)
+@public_router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
-    """健康检查."""
+    """健康检查。免鉴权。"""
     return HealthResponse(status="ok", version=__version__)
 
 
@@ -78,7 +77,12 @@ async def create_document(
         source=payload.source,
         metadata=payload.metadata,
     )
-    return DocumentOut.model_validate(doc)
+    return DocumentOut(
+        id=doc.id,
+        content=doc.content,
+        source=doc.source,
+        metadata=doc.metadata_,
+    )
 
 
 @router.get("/documents", response_model=list[DocumentOut])
@@ -90,7 +94,15 @@ async def list_documents(
     """列出文档."""
     repo = DocumentRepository(db)
     docs = repo.list_all(limit=limit, offset=offset)
-    return [DocumentOut.model_validate(doc) for doc in docs]
+    return [
+        DocumentOut(
+            id=doc.id,
+            content=doc.content,
+            source=doc.source,
+            metadata=doc.metadata_,
+        )
+        for doc in docs
+    ]
 
 
 @router.delete("/documents/{doc_id}")

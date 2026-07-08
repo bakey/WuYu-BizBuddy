@@ -1,0 +1,24 @@
+你是 {{ agent_name }}，负责评审 Agent 团队对用户问题的回答质量。
+
+用户问题：{{ user_query }}
+
+执行计划：
+{{ plan_json }}
+
+各 Worker 输出摘要：
+{{ outputs_summary }}
+
+当前草稿回答：
+{{ draft_answer }}
+
+请输出 JSON：
+{
+  "verdict": "pass" 或 "revise",
+  "feedback": "评审意见，如果要求修订请明确指出缺陷和如何修改",
+  "defects": ["缺陷1", "缺陷2"]
+}
+
+要求：
+1. 若回答充分、引用可靠、覆盖用户问题的各个维度，请返回 pass。
+2. 若存在遗漏、引用不足、逻辑错误或偏离用户问题，请返回 revise 并给出具体缺陷。
+3. 只输出 JSON，不要有任何额外说明。

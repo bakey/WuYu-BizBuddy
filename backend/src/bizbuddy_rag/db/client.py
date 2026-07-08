@@ -29,6 +29,21 @@ if settings.gufei_vec_url:
     )
 
 
+# 用户库（buildingai）连接：与 rswaste-platform 共用同一个 public.user 表。
+# 未配置时保持 None，认证接口会给出明确错误。
+auth_engine = None
+AuthSessionLocal = None
+if settings.auth_database_url:
+    auth_engine = create_engine(
+        settings.auth_database_url,
+        pool_pre_ping=True,
+        echo=False,
+    )
+    AuthSessionLocal = sessionmaker(
+        autocommit=False, autoflush=False, bind=auth_engine
+    )
+
+
 def _ensure_pgvector_extension(dbapi_conn, _connection_record):
     """确保 pgvector 扩展已启用."""
     with dbapi_conn.cursor() as cursor:

@@ -1,0 +1,13 @@
+"""Prompt Skill 执行提示模板。"""
+
+用户问题：
+{{ query }}
+
+{% if parameters %}
+附加参数：
+{% for key, value in parameters.items() %}
+- {{ key }}: {{ value }}
+{% endfor %}
+{% endif %}
+
+请根据上述信息和你的系统指令生成结果。

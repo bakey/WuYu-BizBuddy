@@ -1,86 +1,40 @@
-"""
-skill_id 如何加载 skill:
-    skill = self._get_skill(skill_id)
+"""Industry knowledge skill query service.
 
-如何确定 top_k:
-    优先级是：
-        接口请求传入的 top_k
-        -> skill 自己配置的 top_k
-        -> 系统默认 settings.industry_default_top_k
-
-如何检索 chunks：
-    目前只支持 fulltext 模式，直接调用 repository.retrieve_fulltext(skill.dataset_id, query, top_k)
-
-如何拼 context：
-    把每个 chunk 内容拼成：
-        [1] 第一段内容
-
-        [2] 第二段内容
-
-        [3] 第三段内容
-        同时用 skill.max_context_chars 控制总长度，超出就停止追加
-
-何时兜底，何时调用 LLM，如何写日志和引用:
-    只要没有检索到任何 chunk，就不会调用 LLM，而是直接返回 NO_CONTEXT_ANSWER 这个固定文本，并在日志里标记 status 为 no_context。
-    只有检索到至少一个 chunk 时才调用 LLM，生成回答后在日志里标记 status 为 success。
-
-
-answer()整体链路是：
+answer() 整体链路：
     skill_id
     -> _get_skill()
     -> _resolve_top_k()
     -> _retrieve_segments()
     -> _format_context()
     -> 判断是否有 chunks
-    -> 没有 chunks：兜底回答
+    -> 没有 chunks：返回 NO_CONTEXT_ANSWER
     -> 有 chunks：调用 LLM
     -> create_query_log()
     -> create_query_references()
     -> 返回 answer + references + debug
 """
 
-
-# 模块说明：这里封装行业知识库的检索、问答和反馈业务逻辑。
-"""Industry knowledge skill query service."""
-
-# 导入 dataclasses.replace，用于在重排后生成更新了分数的不可变片段对象。
 from dataclasses import replace
-# 导入高精度计时器，用来统计问答耗时。
 from time import perf_counter
-# 导入 Any，用于标注 debug、tags 等灵活结构的数据。
 from typing import Any
-# 导入 UUID 类型，用于标注数据库主键 ID。
 from uuid import UUID
 
-# 导入项目配置，例如默认 top_k 和最大 top_k。
 from bizbuddy_rag.config import settings
 from bizbuddy_rag.db.industry_knowledge_repository import (
-    # 数据访问层，负责读写行业知识相关数据库表。
     IndustryKnowledgeRepository,
-    # 检索命中的知识片段数据结构。
     IndustryKnowledgeSegment,
-    # 行业知识技能配置数据结构。
     IndustryKnowledgeSkill,
 )
 from bizbuddy_rag.industry_models import (
-    # 返回给前端的引用片段模型。
-    IndustryKnowledgeReference,
-    # 检索接口响应模型。
-    IndustryKnowledgeRetrieveResponse,
-    # 问答接口响应模型。
     IndustryKnowledgeQueryResponse,
+    IndustryKnowledgeReference,
+    IndustryKnowledgeRetrieveResponse,
 )
-# 本地 bge-m3 向量服务，用于向量检索时生成 query 向量。
 from bizbuddy_rag.services.bge_embedding import BgeM3EmbeddingService
-# 本地 bge-reranker 重排服务，用于向量多召回后的精排。
-from bizbuddy_rag.services.reranker import BgeRerankerService
-# 大模型服务，用于生成最终回答。
 from bizbuddy_rag.services.llm import LLMService
-# 项目自定义异常，用于抛出业务错误。
+from bizbuddy_rag.services.reranker import BgeRerankerService
 from bizbuddy_rag.utils.exceptions import RAGException
 
-
-# 没有检索到可用上下文时返回给用户的兜底回答。
 NO_CONTEXT_ANSWER = "当前知识库中没有检索到足够相关的资料，无法基于已有资料回答。"
 
 
@@ -126,6 +80,8 @@ class IndustryKnowledgeQueryService:
         query: str,
         # 可选的返回片段数量；为空则使用技能或系统默认值。
         top_k: int | None = None,
+        # 可选的预计算 query 向量；同一次多路检索复用，避免重复 bge-m3 推理。
+        query_vector: list[float] | None = None,
     ) -> IndustryKnowledgeRetrieveResponse:
         # 方法说明：只检索证据片段，不调用大模型。
         """Retrieve evidence chunks for one enabled skill."""
@@ -134,7 +90,9 @@ class IndustryKnowledgeQueryService:
         # 计算最终使用的 top_k，并限制在系统允许范围内。
         resolved_top_k = self._resolve_top_k(top_k, skill)
         # 从知识库中检索匹配片段。
-        segments = self._retrieve_segments(skill, query, resolved_top_k)
+        segments = self._retrieve_segments(
+            skill, query, resolved_top_k, query_vector=query_vector
+        )
         # 把内部片段结构转换成接口返回的引用模型。
         references = [self._to_reference(segment) for segment in segments]
         return IndustryKnowledgeRetrieveResponse(
@@ -315,7 +273,7 @@ class IndustryKnowledgeQueryService:
         # 返回可用的技能配置。
         return skill
 
-    # 函数作用：确定本次检索实际使用的 top_k，优先使用请求值，其次技能配置，最后系统默认值，并限制最大值。
+    # 确定本次检索实际使用的 top_k：请求值 > 技能配置 > 系统默认，并限制最大值。
     def _resolve_top_k(
         self,
         # 请求中传入的 top_k。
@@ -337,6 +295,9 @@ class IndustryKnowledgeQueryService:
         query: str,
         # 要检索的片段数量。
         top_k: int,
+        *,
+        # 可选的预计算 query 向量：同一次执行内多路检索复用，省 bge-m3 推理。
+        query_vector: list[float] | None = None,
     ) -> list[IndustryKnowledgeSegment]:
         # 全文检索：在业务库 public.datasets_segments 上做中文全文检索。
         if skill.retrieval_mode == "fulltext":
@@ -349,8 +310,8 @@ class IndustryKnowledgeQueryService:
             if self.embedding_service is None:
                 # 向量模式必须注入 embedding 服务。
                 raise RAGException("Vector retrieval requires an embedding service")
-            # 把用户问题编码成 query 向量，并格式化成 pgvector 字面量。
-            vector = self.embedding_service.embed_query(query)
+            # 优先复用外部预计算的 query 向量；未提供才本地推理。
+            vector = query_vector if query_vector is not None else self.embedding_service.embed_query(query)
             query_vector_literal = self.embedding_service.to_pgvector_literal(vector)
             # probes 优先用 skill 配置，其次系统默认。
             probes = skill.ivfflat_probes or settings.industry_vector_probes
@@ -462,7 +423,11 @@ class IndustryKnowledgeQueryService:
         # 对 (query, 正文) 成对打分。
         scores = self.reranker_service.rerank(query, [s.content for s in segments])
         # 按重排分数从高到低排序。
-        ranked = sorted(zip(segments, scores), key=lambda pair: pair[1], reverse=True)
+        ranked = sorted(
+            zip(segments, scores, strict=True),
+            key=lambda pair: pair[1],
+            reverse=True,
+        )
         result: list[IndustryKnowledgeSegment] = []
         for segment, rerank_score in ranked[:top_k]:
             # 保留原始 cosine 分数到 metadata，便于对比和复盘。

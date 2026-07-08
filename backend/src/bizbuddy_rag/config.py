@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-small"
     openai_chat_model: str = "gpt-4o-mini"
 
+    # 本地调试开关：开启后使用 mock embedding / mock llm，无需 OpenAI API Key
+    mock_ai: bool = False
+
     rag_top_k: int = 5
     rag_similarity_threshold: float = 0.7
 
@@ -59,6 +62,25 @@ class Settings(BaseSettings):
     industry_rerank_enabled: bool = False
     # 重排前向量多召回的候选数量（over-fetch），最终再截断到 top_k。
     industry_rerank_over_fetch_k: int = 30
+
+    # Agent 框架：Reviewer 最大修订轮数，0 表示不评审。
+    agent_max_revisions: int = 1
+    # Agent 框架：是否对复合 Agent 的最终输出进行 HTML 美化。
+    agent_format_output: bool = True
+
+    # ── Auth ────────────────────────────────────────────────────────────
+    # 用户库 URL：默认与 rswaste-platform 生产环境共用同一个 buildingai 库，
+    # 里面的 public.user 表既是本服务的用户表，也保证与 rswaste 用户互通。
+    auth_database_url: str = ""
+    # JWT 签名密钥：**必须与 rswaste-platform 保持一致**，否则 token 无法互验。
+    # 生产环境默认值 "buildingai" 与 rswaste 一致，本地开发可覆盖。
+    secret_key: str = "buildingai"
+    # JWT 算法，与 rswaste 保持一致。
+    algorithm: str = "HS256"
+    # access token 过期时间（分钟），与 rswaste 保持一致。
+    access_token_expire_minutes: int = 30
+    # 未登录时前端跳转的登录页地址（rswaste-platform 的登录页）。
+    login_redirect_url: str = "https://www.wuyullm.com/login"
 
 
 settings = Settings()
