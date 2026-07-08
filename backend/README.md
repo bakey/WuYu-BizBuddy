@@ -16,6 +16,10 @@
 - OpenAI (嵌入 + 大模型)
 - uv / pytest / ruff / pyright
 
+## 本地开发环境
+
+详见 [LOCAL_SETUP.md](./LOCAL_SETUP.md)，包含 Postgres Docker、数据库初始化、前后端启动完整步骤。
+
 ## 快速开始
 
 ### 1. 环境准备

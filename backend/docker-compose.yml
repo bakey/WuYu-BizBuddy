@@ -1,9 +1,10 @@
 # 同机部署：复用宿主机的 .env 和本地 bge-m3 模型，用 host 网络直连 127.0.0.1:5440
 services:
-  bizbuddy-rag:
+  bizbuddy-backend:
     build: .
-    image: bizbuddy-rag:latest
-    container_name: bizbuddy-rag
+    image: bizbuddy-backend:latest
+    pull_policy: never
+    container_name: bizbuddy-backend
     # host 网络：容器内 127.0.0.1 == 宿主机，能直接连 5440 的 pg；服务也直接监听宿主 8200
     network_mode: host
     restart: unless-stopped

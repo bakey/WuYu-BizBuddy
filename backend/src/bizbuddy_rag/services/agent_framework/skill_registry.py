@@ -1,21 +1,26 @@
 """Skill 注册表."""
 
+import shutil
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from bizbuddy_rag.config import settings
 from bizbuddy_rag.db.repository import SkillRepository
 
-from .adapters import NativeSkillAdapter, OpenAIFunctionSkillAdapter
+from .adapters import NativeSkillAdapter, OpenAIFunctionSkillAdapter, PromptSkill
+from .skill_package import SkillPackageLoader
 from .skills import BasicRAGSkill, IndustryKnowledgeSkillAdapter, PolicySearchSkill, Skill
 
 
 class SkillRegistry:
     """Skill 注册表，根据 action 名称解析并创建 Skill 实例。
 
-    支持两种来源：
+    支持三种来源：
     1. 原生 Python Skill 类（硬编码）。
     2. 数据库 skills 表中定义的外部 Skill（如 OpenAI function）。
+    3. 项目根目录 skills/ 下的 SKILL.md 技能包（目录或 .zip）。
     """
 
     _skills: dict[str, type[Skill]] = {
@@ -71,6 +76,26 @@ class SkillRegistry:
                 continue
             if isinstance(skill, OpenAIFunctionSkillAdapter):
                 tools.append(skill.as_openai_tool())
+            elif isinstance(skill, PromptSkill):
+                tools.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "description": skill.package.description,
+                            "parameters": skill.package.parameters_schema
+                            or {
+                                "type": "object",
+                                "properties": {
+                                    "query": {
+                                        "type": "string",
+                                        "description": "用户的原始问题",
+                                    }
+                                },
+                            },
+                        },
+                    }
+                )
             elif name == "policy_search":
                 # policy_search 支持按范围多次调用，schema 需暴露 policy_scope
                 tools.append(
@@ -141,6 +166,95 @@ class SkillRegistry:
                 native = cls._load_native(skill_def.handler_module)
                 if native is not None:
                     cls.register_adapter(skill_def.name, native)
+
+    @classmethod
+    def load_from_directory(
+        cls, root: str | Path | None = None, cleanup_zip_extracts: bool = True
+    ) -> list[str]:
+        """从本地 skills 目录加载 SKILL.md 技能包。
+
+        同时支持两种形态：
+        1. 目录形态：skills/skill-name/SKILL.md
+        2. zip 压缩包形态：skills/skill-name.skill.zip（启动时自动解压）
+
+        Args:
+            root: skills 根目录，默认从 settings.skills_dir 读取，否则用项目根目录 skills/。
+            cleanup_zip_extracts: 是否删除 zip 解压后的临时目录（zip 默认解压到
+                root 同级 .extracted 目录并保留，方便调试；设为 True 启动后清理）。
+
+        Returns:
+            成功注册的 skill name 列表。
+        """
+        root_path = cls._resolve_skills_dir(root)
+        if root_path is None or not root_path.exists():
+            return []
+
+        registered: list[str] = []
+        extracted_dir = root_path.parent / ".extracted_skills"
+        extracted_dir.mkdir(parents=True, exist_ok=True)
+
+        # 先处理 zip 压缩包
+        for zip_file in sorted(root_path.glob("*.skill.zip")):
+            try:
+                package = SkillPackageLoader.load_from_zip(zip_file)
+                skill = cls._build_skill_from_package(package)
+                if skill is not None:
+                    cls.register_adapter(skill.name, skill)
+                    registered.append(skill.name)
+            except Exception as exc:
+                # 不因为单个 skill 失败影响启动
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "加载 skill zip 失败: %s, error=%s", zip_file, exc
+                )
+
+        # 再处理目录形态
+        for skill_dir in sorted(root_path.iterdir()):
+            if not skill_dir.is_dir() or skill_dir.name.startswith("."):
+                continue
+            try:
+                package = SkillPackageLoader.load_from_directory(skill_dir)
+                skill = cls._build_skill_from_package(package)
+                if skill is not None:
+                    cls.register_adapter(skill.name, skill)
+                    registered.append(skill.name)
+            except FileNotFoundError:
+                # 没有 SKILL.md 的目录跳过
+                continue
+            except Exception as exc:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "加载 skill 目录失败: %s, error=%s", skill_dir, exc
+                )
+
+        if cleanup_zip_extracts:
+            shutil.rmtree(extracted_dir, ignore_errors=True)
+
+        return registered
+
+    @classmethod
+    def _resolve_skills_dir(cls, root: str | Path | None = None) -> Path | None:
+        """解析 skills 根目录。"""
+        if root is not None:
+            return Path(root)
+        # 优先从 settings 读取 skills_dir
+        if hasattr(settings, "skills_dir"):
+            configured = settings.skills_dir
+            if configured:
+                return Path(configured)
+        # 默认：项目根目录 skills/
+        project_root = Path(__file__).resolve().parents[5]
+        return project_root / "skills"
+
+    @classmethod
+    def _build_skill_from_package(cls, package) -> Skill | None:
+        """根据 package format 创建对应的 Skill 实例。"""
+        if package.format == "prompt":
+            return PromptSkill(package)
+        # 未来可扩展 native/http/mcp 等 format
+        return None
 
     @classmethod
     def clear_adapters(cls) -> None:

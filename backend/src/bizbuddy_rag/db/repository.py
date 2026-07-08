@@ -333,6 +333,7 @@ class SkillRepository:
         description: str,
         parameters_schema: dict[str, object] | None = None,
         format: str = "native",
+        skill_id: str | None = None,
         alias: str | None = None,
         config: dict[str, object] | None = None,
         handler_module: str | None = None,
@@ -341,6 +342,7 @@ class SkillRepository:
         """创建 Skill 定义."""
         skill = SkillDefinition(
             name=name,
+            skill_id=skill_id,
             alias=alias,
             format=format,
             description=description,

@@ -2,5 +2,6 @@
 
 from .native_skill import NativeSkillAdapter
 from .openai_function import OpenAIFunctionSkillAdapter
+from .prompt_skill import PromptSkill
 
-__all__ = ["NativeSkillAdapter", "OpenAIFunctionSkillAdapter"]
+__all__ = ["NativeSkillAdapter", "OpenAIFunctionSkillAdapter", "PromptSkill"]

@@ -9,3 +9,6 @@ python-dotenv
 sentence-transformers
 sqlalchemy
 uvicorn
+# Auth：JWT + bcrypt，与 rswaste-platform 兼容
+python-jose[cryptography]
+passlib[bcrypt]

@@ -61,7 +61,13 @@ class SkillDefinition(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(100), nullable=False, unique=True, comment="Skill 名称")
+    skill_id = Column(
+        String(255), nullable=True, unique=True, comment="外部生态 skill 唯一标识"
+    )
     alias = Column(String(100), nullable=True, comment="外部系统别名")
+    source = Column(
+        String(50), nullable=False, default="internal", comment="来源: internal/skill_md"
+    )
     format = Column(
         String(50), nullable=False, default="native", comment="格式: native/openai_function"
     )
