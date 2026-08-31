@@ -1,0 +1,879 @@
+**文档 / RAG Python Sidecar
+接口协议与实现约定**
+
+API Specification v1.0
+
+适用于：Backend / Electron / Frontend 调用本地 Python Sidecar
+
+| **项目** | **内容** |
+| --- | --- |
+| 文档版本 | v1.0 |
+| 协议状态 | Draft / 可进入联调 |
+| 通信方式 | HTTP/1.1 JSON + multipart/form-data |
+| 监听范围 | 仅 loopback：127.0.0.1 / ::1 |
+| 持久化 | SQLite（元数据）+ LanceDB（向量） |
+| 核心能力 | 文档解析、切片、BGE Embedding、rerank、检索、索引管理 |
+
+# 1. 文档目的与范围
+
+本协议定义桌面端应用与 Python RAG Sidecar 之间的接口、数据模型、状态机、错误码、索引生命周期、部署约束和验收标准。目标是让 Sidecar 可以独立开发、独立启动，并由 Backend / Electron / Frontend 统一通过本地 HTTP API 消费，而不依赖原有 backend/ 中的数据库和多用户鉴权逻辑。
+
+本次裁剪后的边界：Postgres、多用户鉴权和原有远程数据库逻辑不进入 Sidecar；元数据改用 SQLite；向量存储使用嵌入式 LanceDB；文档解析覆盖 PDF、Word、Excel 和常见图片；向量化使用 BGE Embedding；检索结果进入 rerank；同时提供上传、状态、查询、删除、重建和统计等索引管理接口。
+
+# 2. 术语与角色
+
+| **术语** | **定义** |
+| --- | --- |
+| Sidecar | 随主程序启动的本地 Python 可执行进程，负责文档/RAG能力。 |
+| Client | 调用 Sidecar API 的进程，通常为 Backend、Electron 主进程或受控 Frontend。 |
+| Document | 用户上传并纳入知识库管理的原始文件。 |
+| Chunk | 文档切分后的最小检索单元，包含正文、来源页码/Sheet 等定位信息。 |
+| Embedding | 由 BGE 模型产生的向量表示。 |
+| Rerank | 对初步向量召回结果进行二次相关性排序。 |
+| Job | 上传解析、索引重建等异步任务。 |
+| Citation | 可回溯到原始文档、页码/工作表/块位置的引用信息。 |
+
+# 3. 总体架构与职责边界
+
+```
+Desktop App
+  ├─ Frontend / UI
+  ├─ Electron / Backend
+  │     └─ HTTP Client
+  │           │ 127.0.0.1 only
+  │           ▼
+  └─ Python RAG Sidecar
+        ├─ API Layer
+        ├─ Document Parser (PDF / Word / Excel / Image)
+        ├─ Chunker
+        ├─ BGE Embedding
+        ├─ Reranker
+        ├─ SQLite Metadata Store
+        └─ LanceDB Vector Store
+```
+
+- Sidecar MUST 只监听 loopback，不暴露到局域网或公网。
+
+- Sidecar MUST 自主管理 SQLite 与 LanceDB 的初始化、版本迁移和损坏检测。
+
+- Client SHOULD 将 Sidecar 视为独立服务，不直接读写其 SQLite/LanceDB 文件。
+
+- 上传/重建属于异步任务；查询/状态/健康检查属于同步请求。
+
+- Sidecar 不负责最终大模型回答；它负责返回高质量上下文与可核验引用。若后续需要，也可在 /query 结果上层接入 LLM。
+
+# 4. 通信与通用协议约定
+
+| **项** | **约定** |
+| --- | --- |
+| Base URL | http://127.0.0.1:{port}/api/v1 |
+| 编码 | UTF-8 |
+| 数据格式 | 除文件上传外均为 application/json |
+| 上传格式 | multipart/form-data |
+| 时间 | ISO 8601，UTC，例如 2026-08-28T12:00:00Z |
+| ID | UUID v4 字符串 |
+| 布尔值 | true / false |
+| 分页 | page、page_size，默认 1 / 20，page_size 最大 100 |
+| 请求追踪 | Client SHOULD 发送 X-Request-ID；Sidecar MUST 在响应头回传或生成一个新的。 |
+| 协议版本 | URL 路径版本 /api/v1；破坏性变更升级为 /api/v2。 |
+
+HTTP 状态码遵循语义化使用：2xx 表示成功，4xx 表示调用方参数或资源状态问题，5xx 表示 Sidecar 内部错误。业务错误细节统一放在 error 对象中。
+
+```
+{
+  "ok": false,
+  "error": {
+    "code": "DOCUMENT_NOT_READY",
+    "message": "Document is still indexing",
+    "details": {"document_id": "...", "status": "EMBEDDING"},
+    "request_id": "req-..."
+  }
+}
+```
+
+# 5. 安全与进程边界
+
+- MUST 绑定 127.0.0.1，禁止 0.0.0.0。IPv6 可选绑定 ::1。
+
+- MUST 拒绝非 loopback Host/来源的请求；CORS 默认关闭，仅在明确需要浏览器直连时配置白名单。
+
+- 建议由 Electron/Backend 代理调用，不建议任意网页直接访问 Sidecar。
+
+- 可选：主进程启动 Sidecar 时生成一次性随机 X-Sidecar-Token，Sidecar 对所有非 health 接口校验该 Header。此机制无需用户账号体系。
+
+- 文件名必须进行路径净化，禁止 ../、绝对路径、符号链接穿越和任意写盘。
+
+- 解析器应设置超时、最大页数/Sheet 数/像素数等资源限制，避免恶意或异常文件拖垮进程。
+
+# 6. 文档与任务状态机
+
+```
+RECEIVED
+   ↓
+PARSING → CHUNKING → EMBEDDING → INDEXING → READY
+   └────────────── any stage error ──────────────→ FAILED
+
+READY / FAILED
+   └─ DELETE requested → DELETING → DELETED
+
+READY
+   └─ REINDEX requested → PARSING/CHUNKING/... → READY | FAILED
+```
+
+| **状态** | **含义** | **是否可检索** |
+| --- | --- | --- |
+| RECEIVED | 文件已保存，任务已创建 | 否 |
+| PARSING | 提取文本、表格、图片文字/结构 | 否 |
+| CHUNKING | 切片并生成定位元数据 | 否 |
+| EMBEDDING | 计算 BGE 向量 | 否 |
+| INDEXING | 写入 LanceDB 与索引元数据 | 否 |
+| READY | 已完成并可参与查询 | 是 |
+| FAILED | 处理失败，可查看错误并重试 | 否 |
+| DELETING | 正在删除索引/元数据/文件 | 否 |
+| DELETED | 已删除；正常列表默认不返回 | 否 |
+
+# 7. 核心数据模型
+
+## 7.1 Document
+
+```
+{
+  "id": "9e2c...",
+  "name": "设计说明.docx",
+  "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "size_bytes": 183244,
+  "sha256": "...",
+  "status": "READY",
+  "created_at": "2026-08-28T12:00:00Z",
+  "updated_at": "2026-08-28T12:00:08Z",
+  "chunk_count": 146,
+  "metadata": {
+    "source": "user_upload",
+    "tags": ["项目A", "需求"]
+  },
+  "last_error": null
+}
+```
+
+## 7.2 Chunk / Citation
+
+```
+{
+  "chunk_id": "chk_...",
+  "document_id": "9e2c...",
+  "text": "……命中的正文……",
+  "score": 0.8421,
+  "rerank_score": 0.7312,
+  "citation": {
+    "document_name": "设计说明.docx",
+    "page": 12,
+    "sheet": null,
+    "section": "3.2 索引流程",
+    "cell_range": null,
+    "chunk_index": 37
+  }
+}
+```
+
+## 7.3 Job
+
+```
+{
+  "id": "job_...",
+  "type": "DOCUMENT_INGEST",
+  "status": "RUNNING",
+  "progress": 62,
+  "stage": "EMBEDDING",
+  "created_at": "...",
+  "started_at": "...",
+  "finished_at": null,
+  "result": {"document_id": "9e2c..."},
+  "error": null
+}
+```
+
+# 8. API 接口定义
+
+## 8.1 健康检查与版本
+
+**GET /health**
+
+进程存活检查。应尽量轻量，不触发模型加载。
+
+**响应示例**
+
+```
+HTTP/1.1 200 OK
+{
+  "ok": true,
+  "data": {"status": "alive", "uptime_sec": 3812}
+}
+```
+
+**GET /ready**
+
+就绪检查。用于判断 SQLite、LanceDB、Embedding/Rerank 组件是否可接受业务请求。
+
+**响应示例**
+
+```
+{
+  "ok": true,
+  "data": {
+    "ready": true,
+    "sqlite": "ok",
+    "lancedb": "ok",
+    "embedding": "loaded",
+    "reranker": "loaded"
+  }
+}
+```
+
+**GET /version**
+
+返回 Sidecar、API、数据库 schema 与模型版本。
+
+**响应示例**
+
+```
+{
+  "ok": true,
+  "data": {
+    "sidecar_version": "1.0.0",
+    "api_version": "v1",
+    "schema_version": 3,
+    "embedding_model": "BAAI/bge-m3",
+    "rerank_model": "BAAI/bge-reranker-v2-m3"
+  }
+}
+```
+
+## 8.2 文档上传与管理
+
+**POST /documents**
+
+上传单个文档并创建异步入库任务。
+
+**参数**
+
+| **名称** | **位置/类型** | **必填** | **说明** |
+| --- | --- | --- | --- |
+| file | multipart file | 是 | PDF / DOCX / XLSX / XLS / PNG / JPG / JPEG 等允许类型 |
+| metadata | JSON string | 否 | 业务元数据，例如 tags、source、project_id |
+| deduplicate | boolean | 否 | 默认 true；按 sha256 去重 |
+
+**请求示例**
+
+```
+Content-Type: multipart/form-data
+
+file=@设计说明.docx
+metadata={"tags":["项目A"],"source":"user_upload"}
+deduplicate=true
+```
+
+**响应示例**
+
+```
+HTTP/1.1 202 Accepted
+{
+  "ok": true,
+  "data": {
+    "document_id": "9e2c...",
+    "job_id": "job_31d...",
+    "status": "RECEIVED",
+    "deduplicated": false
+  }
+}
+```
+
+- 若 sha256 已存在且 deduplicate=true，建议返回 200，并指向既有 document_id，而不是重复入库。
+
+- 上传成功仅代表文件接收成功，不代表已可检索；Client 必须根据 job 或 document status 判断 READY。
+
+**GET /documents**
+
+分页获取文档列表。
+
+**参数**
+
+| **名称** | **位置/类型** | **必填** | **说明** |
+| --- | --- | --- | --- |
+| page | query/int | 否 | 默认 1 |
+| page_size | query/int | 否 | 默认 20，最大 100 |
+| status | query/string | 否 | 按状态筛选 |
+| q | query/string | 否 | 按文件名模糊搜索 |
+| tag | query/string | 否 | 按 tag 筛选 |
+
+**响应示例**
+
+```
+{
+  "ok": true,
+  "data": {
+    "items": [{"id":"...","name":"设计说明.docx","status":"READY","chunk_count":146}],
+    "page": 1,
+    "page_size": 20,
+    "total": 37
+  }
+}
+```
+
+**GET /documents/{document_id}**
+
+获取单个文档详情、当前状态和最近失败原因。
+
+**响应示例**
+
+```
+{
+  "ok": true,
+  "data": {
+    "id":"9e2c...",
+    "name":"设计说明.docx",
+    "status":"READY",
+    "chunk_count":146,
+    "last_job_id":"job_31d...",
+    "last_error":null
+  }
+}
+```
+
+**DELETE /documents/{document_id}**
+
+删除文档。删除必须同时覆盖原文件、SQLite 元数据、Chunk 记录与 LanceDB 向量。
+
+**参数**
+
+| **名称** | **位置/类型** | **必填** | **说明** |
+| --- | --- | --- | --- |
+| purge_file | query/boolean | 否 | 默认 true；是否删除 Sidecar 托管的原始文件 |
+
+**响应示例**
+
+```
+HTTP/1.1 202 Accepted
+{
+  "ok": true,
+  "data": {"document_id":"9e2c...","job_id":"job_del...","status":"DELETING"}
+}
+```
+
+- 验收要求：删除任务完成后，/query 不得再返回该 document_id 的任何 chunk。
+
+- 重复 DELETE 建议幂等；已删除资源可返回 204 或带 deleted=true 的 200。
+
+**POST /documents/{document_id}/reindex**
+
+对已有文档重新解析、切片、向量化并替换旧索引。适用于切片参数、模型版本或解析器升级。
+
+**请求示例**
+
+```
+{
+  "reason": "embedding_model_changed",
+  "force": true
+}
+```
+
+**响应示例**
+
+```
+HTTP/1.1 202 Accepted
+{
+  "ok": true,
+  "data": {"job_id":"job_reindex...","document_id":"9e2c..."}
+}
+```
+
+## 8.3 异步任务
+
+**GET /jobs/{job_id}**
+
+查询异步任务进度。Client 推荐轮询 500 ms～2 s，并在任务完成后停止。
+
+**响应示例**
+
+```
+{
+  "ok": true,
+  "data": {
+    "id":"job_31d...",
+    "type":"DOCUMENT_INGEST",
+    "status":"RUNNING",
+    "progress":62,
+    "stage":"EMBEDDING",
+    "message":"Embedding 91 / 146 chunks"
+  }
+}
+```
+
+**GET /jobs**
+
+查询最近任务，可用于桌面端“任务中心”。
+
+**参数**
+
+| **名称** | **位置/类型** | **必填** | **说明** |
+| --- | --- | --- | --- |
+| status | query/string | 否 | PENDING/RUNNING/SUCCEEDED/FAILED/CANCELLED |
+| limit | query/int | 否 | 默认 50，最大 200 |
+
+**响应示例**
+
+```
+{
+  "ok": true,
+  "data": {"items": [], "total": 0}
+}
+```
+
+## 8.4 RAG 检索
+
+**POST /query**
+
+执行向量召回 + rerank，返回最终上下文及引用。该接口是 B/E/F 获取 RAG 上下文的主入口。
+
+**参数**
+
+| **名称** | **位置/类型** | **必填** | **说明** |
+| --- | --- | --- | --- |
+| query | body/string | 是 | 用户问题或检索文本，去首尾空格后长度 > 0 |
+| top_k | body/int | 否 | 向量初召回数量，建议默认 20 |
+| rerank_top_k | body/int | 否 | 重排后返回数量，建议默认 6 |
+| document_ids | body/string[] | 否 | 限定文档集合 |
+| tags | body/string[] | 否 | 限定 metadata.tags |
+| min_score | body/number | 否 | 最低召回阈值，可为空 |
+| include_text | body/boolean | 否 | 默认 true |
+
+**请求示例**
+
+```
+{
+  "query": "索引重建接口在什么情况下使用？",
+  "top_k": 20,
+  "rerank_top_k": 6,
+  "document_ids": [],
+  "tags": ["项目A"],
+  "include_text": true
+}
+```
+
+**响应示例**
+
+```
+{
+  "ok": true,
+  "data": {
+    "query": "索引重建接口在什么情况下使用？",
+    "took_ms": 84,
+    "results": [
+      {
+        "chunk_id":"chk_...",
+        "document_id":"9e2c...",
+        "document_name":"设计说明.docx",
+        "text":"……当 embedding 模型或切片参数变化时，应重新构建索引……",
+        "vector_score":0.8421,
+        "rerank_score":0.7312,
+        "citation": {"page":12,"section":"3.2 索引流程","chunk_index":37}
+      }
+    ]
+  }
+}
+```
+
+- 只允许 READY 文档参与检索。
+
+- 最终排序 SHOULD 以 rerank_score 为主；若 reranker 关闭，可退化为 vector_score。
+
+- citation MUST 足够让 UI 展示“来自哪个文档/页/Sheet/段落”。
+
+- 当没有达到阈值的结果时返回 200 + results: []，不要伪造命中。
+
+**POST /query/context**
+
+生成适合直接拼接到 LLM Prompt 的上下文块，但不调用大模型。
+
+**请求示例**
+
+```
+{
+  "query":"如何删除文档？",
+  "rerank_top_k":4,
+  "max_context_chars":12000
+}
+```
+
+**响应示例**
+
+```
+{
+  "ok": true,
+  "data": {
+    "context":"[1] 设计说明.docx p.12\n...",
+    "citations":[{"index":1,"document_id":"...","page":12,"chunk_id":"..."}],
+    "truncated":false
+  }
+}
+```
+
+## 8.5 索引管理
+
+**POST /indexes/rebuild**
+
+全量重建知识库索引。一般用于数据库结构迁移、Embedding 模型升级或 LanceDB 索引损坏恢复。
+
+**请求示例**
+
+```
+{
+  "scope": "all",
+  "force": false
+}
+```
+
+**响应示例**
+
+```
+HTTP/1.1 202 Accepted
+{
+  "ok": true,
+  "data": {"job_id":"job_rebuild...","status":"PENDING"}
+}
+```
+
+**GET /indexes/status**
+
+返回索引概况与一致性信息。
+
+**响应示例**
+
+```
+{
+  "ok": true,
+  "data": {
+    "documents_ready": 36,
+    "chunks": 8241,
+    "vectors": 8241,
+    "orphan_vectors": 0,
+    "embedding_model":"BAAI/bge-m3",
+    "last_rebuild_at":"2026-08-27T08:20:00Z"
+  }
+}
+```
+
+**POST /indexes/compact**
+
+可选维护接口：压缩/优化 LanceDB 数据文件。
+
+**响应示例**
+
+```
+HTTP/1.1 202 Accepted
+{
+  "ok": true,
+  "data": {"job_id":"job_compact..."}
+}
+```
+
+## 8.6 统计与运行信息
+
+**GET /stats**
+
+用于设置页或诊断页展示知识库规模、磁盘占用和任务数量。
+
+**响应示例**
+
+```
+{
+  "ok": true,
+  "data": {
+    "documents_total": 37,
+    "documents_ready": 36,
+    "chunks_total": 8241,
+    "storage_bytes": 338420112,
+    "jobs_running": 0
+  }
+}
+```
+
+# 9. 错误码规范
+
+| **HTTP** | **error.code** | **场景** |
+| --- | --- | --- |
+| 400 | INVALID_ARGUMENT | 缺少必填字段、字段类型错误、query 为空 |
+| 400 | UNSUPPORTED_FILE_TYPE | 不支持的文件类型 |
+| 400 | FILE_TOO_LARGE | 文件超过配置上限 |
+| 404 | DOCUMENT_NOT_FOUND | document_id 不存在 |
+| 404 | JOB_NOT_FOUND | job_id 不存在 |
+| 409 | DOCUMENT_NOT_READY | 对未 READY 文档执行需就绪的操作 |
+| 409 | JOB_ALREADY_RUNNING | 同一资源已有互斥任务运行 |
+| 409 | DUPLICATE_DOCUMENT | 关闭自动去重时，可显式报告重复 |
+| 422 | PARSE_FAILED | 文件可接收但解析失败 |
+| 422 | EMPTY_DOCUMENT | 解析后无可索引文本 |
+| 500 | INTERNAL_ERROR | 未分类内部异常 |
+| 503 | MODEL_NOT_READY | Embedding/Reranker 尚未加载或加载失败 |
+| 503 | STORAGE_UNAVAILABLE | SQLite/LanceDB 不可用 |
+| 507 | INSUFFICIENT_STORAGE | 磁盘空间不足 |
+
+message 面向开发者，应该稳定、清晰；details 可包含阶段、原始异常类型、文档 ID 等诊断信息，但不应泄露本机绝对路径、隐私数据或完整堆栈。完整 traceback 写本地日志。
+
+# 10. 文档解析与切片约定
+
+| **类型** | **最小解析要求** | **Citation 定位** |
+| --- | --- | --- |
+| PDF | 提取分页文本；扫描 PDF 可走 OCR（若组件启用） | page |
+| DOCX | 段落、标题、表格文本；尽量保留标题层级 | section / paragraph |
+| XLSX/XLS | 按 Sheet、行列读取；表头与数据行一并组织 | sheet / cell_range |
+| PNG/JPG/JPEG | OCR 或视觉文字提取；无可读文字时可标记 EMPTY_DOCUMENT | image/page=1 |
+
+建议默认切片策略（属于可配置默认值，不属于协议硬编码）：按结构优先切分，目标 700～1000 个中文字符，overlap 80～150 字符；标题、页码、Sheet、表头等结构元数据必须随 Chunk 保存。表格尽量按“表头 + 若干连续数据行”切片，避免拆掉表头。
+
+- 每个 Chunk MUST 有稳定 chunk_id，且同一版本文档内 chunk_index 递增。
+
+- 重建索引时使用“新索引完成后再切换”的 replace 策略，避免查询过程中出现半旧半新数据。
+
+- 解析后的纯文本可选择落 SQLite/独立缓存文件；但 API 不依赖其具体存储方式。
+
+- 图片/OCR 功能如果未打包模型，应在 /version 或 capabilities 中明确报告 disabled，而不是静默失败。
+
+# 11. Embedding、向量库与 Rerank 约定
+
+Embedding 与 rerank 模型名称允许通过配置文件切换。接口层只暴露模型标识和版本，不把向量维度等底层细节泄露给调用方。推荐的处理链为：Query normalize → BGE query embedding → LanceDB top-k 召回 → 元数据过滤 → rerank → 阈值裁剪 → 返回 Citation。
+
+```
+query
+  → normalize
+  → embedding(query)
+  → LanceDB vector search (top_k=20)
+  → metadata/document filters
+  → rerank(query, candidate_chunks)
+  → top 6
+  → response + citations
+```
+
+- 同一知识库中的向量必须由同一 embedding model/version 生成；模型变化必须触发重建。
+
+- SQLite 中建议记录 embedding_model、embedding_dim、chunker_version、parser_version、index_generation。
+
+- Reranker 失败时可配置 fail-open：退化到向量得分，同时在响应 meta 中返回 rerank_degraded=true；是否允许退化由产品决定。
+
+# 12. SQLite 元数据建议 Schema
+
+| **表** | **关键字段** | **用途** |
+| --- | --- | --- |
+| documents | id, name, mime_type, sha256, status, metadata_json, created_at, updated_at, last_error | 文档主表 |
+| chunks | id, document_id, chunk_index, text, locator_json, content_hash | Chunk 文本和引用定位 |
+| jobs | id, type, status, progress, stage, payload_json, result_json, error_json, timestamps | 异步任务 |
+| settings | key, value_json, updated_at | 本地配置与 schema/model 版本 |
+| index_generations | id, embedding_model, chunker_version, created_at, active | 索引代次，用于原子切换 |
+
+LanceDB 中每条记录至少需要：chunk_id、document_id、vector、必要过滤字段（例如 tags 或 project_id）和 index_generation。正文可存 LanceDB，也可只存 SQLite；如果分开存储，查询时需避免 N+1 读。
+
+# 13. 配置文件约定
+
+建议 Sidecar 接受一个启动参数 --config <path>，配置采用 TOML 或 YAML。以下为建议项：
+
+```
+[server]
+host = "127.0.0.1"
+port = 17861
+request_timeout_sec = 60
+
+[storage]
+data_dir = "<app-data>/rag-sidecar"
+sqlite_file = "metadata.db"
+lancedb_dir = "lancedb"
+
+[upload]
+max_file_mb = 200
+allowed_extensions = ["pdf", "docx", "xlsx", "xls", "png", "jpg", "jpeg"]
+
+[chunking]
+target_chars = 850
+overlap_chars = 120
+
+[embedding]
+model = "BAAI/bge-m3"
+batch_size = 32
+
+[rerank]
+enabled = true
+model = "BAAI/bge-reranker-v2-m3"
+
+[search]
+top_k = 20
+rerank_top_k = 6
+```
+
+模型路径可在打包时改为本地相对路径，避免运行期联网下载。所有配置应可被 /version 或 /capabilities 以“非敏感摘要”形式查看，便于联调。
+
+# 14. Sidecar 进程启动与 PyInstaller 交付约定
+
+1. 主程序选择一个可用本地端口，或通过 --port 传给 Sidecar。
+
+2. 启动命令建议：rag-sidecar.exe --port 17861 --data-dir <appData>/rag --log-dir <appData>/logs。
+
+3. 主程序循环调用 /health；进程存活后调用 /ready。只有 ready=true 才开放知识库 UI。
+
+4. Sidecar 启动期间完成数据库迁移、LanceDB 打开和模型加载；耗时操作不得阻塞 /health。
+
+5. 主程序退出时先向 Sidecar 发送正常终止信号或直接终止子进程；Sidecar 必须能安全关闭 SQLite/LanceDB。
+
+6. PyInstaller 采用 one-file 或 one-folder 均可；若模型体积大，推荐 one-folder 或外置只读模型目录，减少每次启动解包开销。
+
+- MUST 支持无网络环境启动。
+
+- MUST 把可写数据放到用户 AppData/Application Support 等目录，不能写进安装目录。
+
+- MUST 记录 sidecar PID，并由父进程托管，避免孤儿进程长期驻留。
+
+- SHOULD 在启动参数中支持 --parent-pid；检测父进程消失后自动退出。
+
+# 15. 日志、诊断与可观测性
+
+| **项** | **要求** |
+| --- | --- |
+| 日志格式 | 建议 JSON Lines；至少包含 timestamp、level、event、request_id、job_id/document_id |
+| 日志级别 | DEBUG / INFO / WARNING / ERROR |
+| 日志滚动 | 按大小或日期滚动，默认保留 7～14 天 |
+| 敏感信息 | 禁止写入完整文档正文、token、绝对用户隐私路径；必要时只写 basename/hash |
+| 性能字段 | query_took_ms、embedding_ms、rerank_ms、candidates、results |
+| 诊断包 | 可选：导出版本、配置摘要、最近日志和 DB schema 版本，不导出用户文档正文 |
+
+# 16. 并发、幂等与一致性
+
+- 上传和查询可并发；同一 document_id 的 delete/reindex 应互斥。
+
+- SQLite 开启 WAL 模式，设置 busy_timeout，避免查询与状态更新互相阻塞。
+
+- 异步任务必须持久化 Job 状态；Sidecar 异常退出后，启动时将 RUNNING 任务恢复为 FAILED/INTERRUPTED 或按策略继续。
+
+- DELETE 操作必须对 SQLite 与 LanceDB 采用可恢复流程；若部分删除失败，状态保持 DELETING/FAILED 并允许重试。
+
+- 重建索引采用 generation 或临时表机制，完成后原子切换 active generation；切换前旧索引继续服务。
+
+- 对上传可支持 Idempotency-Key；相同 key + 相同 body 在有效期内返回同一结果。
+
+# 17. 验收标准
+
+| **编号** | **验收场景** | **通过条件** |
+| --- | --- | --- |
+| A01 | Sidecar 启动 | 无需 Postgres/账号服务即可启动，/health=200，最终 /ready.ready=true |
+| A02 | 上传 PDF/Word/Excel/图片 | POST /documents 返回 202；状态按流程进入 READY 或给出明确 FAILED |
+| A03 | 状态流转 | UI 可通过 /jobs 或 /documents/{id} 看到“解析中→已入知识库” |
+| A04 | 检索命中 | 对文档内已知问题，/query 返回相关 Chunk 且 citation 可定位原文 |
+| A05 | 删除文档 | 删除任务完成后，文档不在默认列表中，且 /query 无法检索到该 document_id |
+| A06 | 重建索引 | /indexes/rebuild 可完成；重建期间查询不出现半索引状态 |
+| A07 | 重复上传 | 相同文件在 deduplicate=true 时不生成重复向量 |
+| A08 | 断电/强杀恢复 | 再次启动数据库可打开；残留 RUNNING 任务被正确处理 |
+| A09 | 本地安全 | 服务仅监听 127.0.0.1/::1，局域网地址不可访问 |
+| A10 | 单文件打包/交付 | 目标 Windows 环境无 Python 也能启动并完成上传、查询、删除闭环 |
+
+# 18. 推荐联调流程
+
+```
+1) Start sidecar
+2) GET /health
+3) GET /ready
+4) POST /documents                    → document_id + job_id
+5) GET /jobs/{job_id}                 → RUNNING ... SUCCEEDED
+6) GET /documents/{document_id}       → READY
+7) POST /query                        → chunks + citations
+8) DELETE /documents/{document_id}    → delete job
+9) GET /jobs/{delete_job_id}          → SUCCEEDED
+10) POST /query                       → no result from deleted document
+```
+
+# 19. 向后兼容与版本演进
+
+- v1 内新增可选字段属于兼容性变更；Client 必须忽略未知字段。
+
+- 删除字段、修改字段类型、改变状态语义等属于破坏性变更，应升级 /api/v2。
+
+- 数据库 schema_version 与 API version 分离；内部迁移不应迫使 Client 升级。
+
+- 模型升级如果会改变既有向量语义，必须记录新的 index_generation 并触发重建。
+
+# 20. OpenAPI 交付建议
+
+正式开发时建议 Sidecar 使用 FastAPI/Pydantic 直接生成 OpenAPI 3.1，并提供 /docs（仅开发模式）与 /openapi.json。前后端 SDK 可基于 openapi.json 自动生成，减少字段漂移。生产环境可以关闭 Swagger UI，但保留版本化的 openapi.json 文件随源码交付。
+
+```
+openapi: 3.1.0
+info:
+  title: RAG Sidecar API
+  version: 1.0.0
+servers:
+  - url: http://127.0.0.1:{port}/api/v1
+paths:
+  /health: ...
+  /ready: ...
+  /documents: ...
+  /documents/{document_id}: ...
+  /jobs/{job_id}: ...
+  /query: ...
+  /indexes/rebuild: ...
+```
+
+# 21. 开发前需要团队冻结的 10 个参数
+
+| **#** | **决策项** | **建议初值** |
+| --- | --- | --- |
+| 1 | 固定端口还是主进程动态分配 | 动态分配优先；若固定可用 17861 |
+| 2 | 是否启用 X-Sidecar-Token | 建议启用 |
+| 3 | 单文件最大体积 | 200 MB |
+| 4 | 是否支持扫描 PDF / 图片 OCR | 支持但可作为 capability 开关 |
+| 5 | BGE Embedding 型号 | bge-m3（或项目已有模型） |
+| 6 | Reranker 型号 | bge-reranker-v2-m3（或项目已有模型） |
+| 7 | Chunk 大小/Overlap | 850 / 120 中文字符 |
+| 8 | 召回 top_k / rerank_top_k | 20 / 6 |
+| 9 | 重复文件策略 | SHA-256 去重 |
+| 10 | PyInstaller 方式 | 模型较大时 one-folder；纯执行体可 one-file |
+
+# 附录 A：统一成功响应建议
+
+```
+{
+  "ok": true,
+  "data": {},
+  "meta": {
+    "request_id": "req_...",
+    "api_version": "v1"
+  }
+}
+```
+
+# 附录 B：统一失败响应建议
+
+```
+{
+  "ok": false,
+  "error": {
+    "code": "INVALID_ARGUMENT",
+    "message": "query must not be empty",
+    "details": {"field": "query"},
+    "request_id": "req_..."
+  }
+}
+```
+
+# 附录 C：建议目录结构
+
+```
+rag-sidecar/
+├─ app/
+│  ├─ api/
+│  ├─ parsers/
+│  ├─ chunking/
+│  ├─ embedding/
+│  ├─ rerank/
+│  ├─ storage/
+│  ├─ jobs/
+│  └─ models/
+├─ migrations/
+├─ tests/
+├─ config.example.toml
+├─ pyproject.toml
+└─ build.spec
+```
