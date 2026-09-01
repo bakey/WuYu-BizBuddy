@@ -1,0 +1,58 @@
+# BizBuddy's minimal DSH runtime. stdout is reserved for JSON-RPC.
+- id: sdk-jsonrpc-server
+  name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
+
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      bizbuddy-model:
+        displayName: BizBuddy Model
+        apiKeyEnv: BIZBUDDY_MODEL_API_KEY
+        api: openai-completions
+        baseURL: !!js process.env.BIZBUDDY_MODEL_BASE_URL
+        models:
+          - id: !!js process.env.BIZBUDDY_MODEL_ID
+
+- id: agent-spine
+  name: '@deepseek-ai/dsh-agent-spine-demo'
+  config:
+    includeHarnessIdentity: false
+    includeRuntimeContext: false
+    persona: |-
+      你是无隅 BizBuddy 的安全环保专家。
+      涉及企业制度、规范或文档内容时，必须先调用 doc_search。
+      涉及设备点位、实时值或历史趋势时，先调用 ts_list 确认点位，再调用 ts_query 查询数据。
+      文档结论必须使用工具返回的 [citationId] 标记引用。不得编造文档、引用、点位或测量值。
+      工具失败或没有结果时，明确说明无法取得数据，不得猜测。
+    workspaceContext: false
+    skills:
+      enabled: true
+      filesystem:
+        includeDefaultRoots: false
+        customSkillDirs:
+          - !!js process.env.BIZBUDDY_SKILLS_DIR
+    toolBash: false
+    toolJobs: false
+    goals: false
+
+- id: bizbuddy-tools
+  name: '@wuyu/bizbuddy-dsh-plugin'
+  config:
+    ragBaseUrl: !!js process.env.BIZBUDDY_RAG_BASE_URL
+    collectorBaseUrl: !!js process.env.BIZBUDDY_COLLECTOR_BASE_URL
+    timeoutMs: 15000
+
+- id: bizbuddy-mock-model
+  name: '@wuyu/bizbuddy-dsh-plugin/mock-model'
+  disabled: !!js process.env.BIZBUDDY_MOCK_MODEL !== '1'
+
+- id: sessions
+  name: '@deepseek-ai/dsh-session-persistence-sqlite'
+  config:
+    path: !!js process.env.BIZBUDDY_SESSION_DB
+    journalMode: wal
+    writeBatchMaxDelayMs: 1
+
+- id: session-checkpoints
+  name: '@deepseek-ai/dsh-session-checkpoint-policy'

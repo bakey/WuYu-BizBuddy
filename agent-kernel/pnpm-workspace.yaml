@@ -1,0 +1,8 @@
+packages:
+  - packages/*
+
+allowBuilds:
+  '@google/genai': true
+  protobufjs: true
+
+autoInstallPeers: true
