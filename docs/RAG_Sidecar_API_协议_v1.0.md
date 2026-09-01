@@ -83,7 +83,7 @@ HTTP 状态码遵循语义化使用：2xx 表示成功，4xx 表示调用方参�
 {
   "ok": false,
   "error": {
-    "code": "DOCUMENT_NOT_READY",
+    "code": "FAILED_PRECONDITION",
     "message": "Document is still indexing",
     "details": {"document_id": "...", "status": "EMBEDDING"},
     "request_id": "req-..."
@@ -212,7 +212,7 @@ HTTP/1.1 200 OK
 
 **GET /ready**
 
-就绪检查。用于判断 PostgreSQL、Embedding/Rerank 组件是否可接受业务请求。
+就绪检查。用于判断数据库、Embedding/Rerank 组件是否可接受业务请求。
 
 **响应示例**
 
@@ -221,8 +221,7 @@ HTTP/1.1 200 OK
   "ok": true,
   "data": {
     "ready": true,
-    "postgres": "ok",
-    "pgvector": "ok",
+    "database": "ok",
     "embedding": "loaded",
     "reranker": "loaded"
   }
@@ -231,7 +230,7 @@ HTTP/1.1 200 OK
 
 **GET /version**
 
-返回 Sidecar、API、数据库 schema 与模型版本。
+返回 Sidecar、API 与数据库 schema 版本。具体模型名称不在此返回（模型会随升级变动），可通过 /capabilities 或配置查看当前生效模型。
 
 **响应示例**
 
@@ -241,9 +240,7 @@ HTTP/1.1 200 OK
   "data": {
     "sidecar_version": "1.0.0",
     "api_version": "v1",
-    "schema_version": 3,
-    "embedding_model": "BAAI/bge-m3",
-    "rerank_model": "BAAI/bge-reranker-v2-m3"
+    "schema_version": 3
   }
 }
 ```
@@ -601,22 +598,21 @@ HTTP/1.1 202 Accepted
 
 | **HTTP** | **error.code** | **场景** |
 | --- | --- | --- |
-| 400 | INVALID_ARGUMENT | 缺少必填字段、字段类型错误、query 为空 |
-| 400 | UNSUPPORTED_FILE_TYPE | 不支持的文件类型 |
-| 400 | FILE_TOO_LARGE | 文件超过配置上限 |
-| 404 | DOCUMENT_NOT_FOUND | document_id 不存在 |
-| 404 | JOB_NOT_FOUND | job_id 不存在 |
-| 409 | DOCUMENT_NOT_READY | 对未 READY 文档执行需就绪的操作 |
-| 409 | JOB_ALREADY_RUNNING | 同一资源已有互斥任务运行 |
-| 409 | DUPLICATE_DOCUMENT | 关闭自动去重时，可显式报告重复 |
-| 422 | PARSE_FAILED | 文件可接收但解析失败 |
-| 422 | EMPTY_DOCUMENT | 解析后无可索引文本 |
-| 500 | INTERNAL_ERROR | 未分类内部异常 |
-| 503 | MODEL_NOT_READY | Embedding/Reranker 尚未加载或加载失败 |
-| 503 | STORAGE_UNAVAILABLE | PostgreSQL 不可用 |
-| 507 | INSUFFICIENT_STORAGE | 磁盘空间不足 |
+| 400 | INVALID_ARGUMENT | 缺少必填字段、字段类型错误、query 为空、不支持的文件类型、文件超过上限 |
+| 400 | FAILED_PRECONDITION | 对未 READY 文档执行需就绪的操作；同一文档已有互斥任务运行；文件可接收但解析失败、解析后无可索引文本 |
+| 400 | OUT_OF_RANGE | 分页/参数超出允许范围（page、page_size、top_k 等） |
+| 401 | UNAUTHENTICATED | 缺少或校验失败 X-Sidecar-Token |
+| 403 | PERMISSION_DENIED | 客户端无权限访问该资源/接口 |
+| 404 | NOT_FOUND | document_id / job_id 不存在 |
+| 409 | ALREADY_EXISTS | 关闭自动去重时，重复文档被显式报告 |
+| 429 | RESOURCE_EXHAUSTED | 请求配额/速率超限；文件体量超过配置上限 |
+| 500 | INTERNAL | 未分类内部异常 |
+| 500 | DATA_LOSS | 数据损坏或不可恢复（如元数据与向量不一致） |
+| 501 | UNIMPLEMENTED | 功能未实现（如 OCR/图片能力，若未打包模型） |
+| 503 | UNAVAILABLE | PostgreSQL 不可用；Embedding/Reranker 未加载 |
+| 504 | DEADLINE_EXCEEDED | 解析/索引处理超时 |
 
-message 面向开发者，应该稳定、清晰；details 可包含阶段、原始异常类型、文档 ID 等诊断信息，但不应泄露本机绝对路径、隐私数据或完整堆栈。完整 traceback 写本地日志。
+错误码采用 Google API 标准错误模型（业界普遍一致使用的约定）：`error.code` 为稳定、机器可读的枚举值，并对应标准的 HTTP 状态码（400/401/403/404/409/429/500/501/503/504）。message 面向开发者，应该稳定、清晰；details 可包含阶段、原始异常类型、文档 ID 等诊断信息，但不应泄露本机绝对路径、隐私数据或完整堆栈。完整 traceback 写本地日志。
 
 # 10. 文档解析与切片约定
 
@@ -625,9 +621,19 @@ message 面向开发者，应该稳定、清晰；details 可包含阶段、原�
 | PDF | 提取分页文本；扫描 PDF 可走 OCR（若组件启用） | page |
 | DOCX | 段落、标题、表格文本；尽量保留标题层级 | section / paragraph |
 | XLSX/XLS | 按 Sheet、行列读取；表头与数据行一并组织 | sheet / cell_range |
-| PNG/JPG/JPEG | OCR 或视觉文字提取；无可读文字时可标记 EMPTY_DOCUMENT | image/page=1 |
+| PNG/JPG/JPEG | OCR 或视觉文字提取；无可读文字时归入 FAILED_PRECONDITION（无索引文本） | image/page=1 |
 
-建议默认切片策略（属于可配置默认值，不属于协议硬编码）：按结构优先切分，目标 700～1000 个中文字符，overlap 80～150 字符；标题、页码、Sheet、表头等结构元数据必须随 Chunk 保存。表格尽量按“表头 + 若干连续数据行”切片，避免拆掉表头。
+建议默认切片策略（属于可配置默认值，不属于协议硬编码）：切片**不是一刀切**，而是按文件类型与数据量自适应。通用约束：标题、页码、Sheet、表头等结构元数据必须随 Chunk 保存；表格按“表头 + 若干连续数据行”组织，避免拆散表头。
+
+- **按文件类型差异化**：
+  - PDF / Word：优先按标题、章节、段落等结构边界切分，尽量保留标题层级，下一页/节用 citation 定位。
+  - XLSX / XLS：按 Sheet + 表头 + 连续数据行切片，单行或行组为一个 chunk，表头随每个块保留。
+  - 图片 / OCR：按页切分，每页作为一个 chunk，页码作为定位。
+- **按数据量自适应**：
+  - 小文件（如摘要、短文）：可整体作为少量 chunk 或按段落切，避免过度碎片化。
+  - 中大文件（长报告、多页 PDF、大表格）：自动降低单 chunk 目标字符数、增加层级与块数，控制信息密度与总量。
+  - 超长表格：按“表头 + 若干连续数据行”分块，避免单个 chunk 过大或拆掉表头。
+- **基线参数**：单 chunk 目标字符数（如 700～1000 中文字符）与 overlap（如 80～150 字符）仅作为默认基线，实际按类型与规模动态调整，不写死；切片粒度上限应由配置约束（如 max_chunks 或单 chunk 最大字符数）。
 
 - 每个 Chunk MUST 有稳定 chunk_id，且同一版本文档内 chunk_index 递增。
 
@@ -690,8 +696,10 @@ max_file_mb = 200
 allowed_extensions = ["pdf", "docx", "xlsx", "xls", "png", "jpg", "jpeg"]
 
 [chunking]
+# 默认基线；实际按文件类型与数据量动态调整
 target_chars = 850
 overlap_chars = 120
+max_chunks = 5000
 
 [embedding]
 model = "BAAI/bge-m3"
