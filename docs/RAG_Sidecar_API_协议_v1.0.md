@@ -11,14 +11,14 @@ API Specification v1.0
 | 协议状态 | Draft / 可进入联调 |
 | 通信方式 | HTTP/1.1 JSON + multipart/form-data |
 | 监听范围 | 仅 loopback：127.0.0.1 / ::1 |
-| 持久化 | SQLite（元数据）+ LanceDB（向量） |
+| 持久化 | PostgreSQL（元数据 + 向量，pgvector） |
 | 核心能力 | 文档解析、切片、BGE Embedding、rerank、检索、索引管理 |
 
 # 1. 文档目的与范围
 
 本协议定义桌面端应用与 Python RAG Sidecar 之间的接口、数据模型、状态机、错误码、索引生命周期、部署约束和验收标准。目标是让 Sidecar 可以独立开发、独立启动，并由 Backend / Electron / Frontend 统一通过本地 HTTP API 消费，而不依赖原有 backend/ 中的数据库和多用户鉴权逻辑。
 
-本次裁剪后的边界：Postgres、多用户鉴权和原有远程数据库逻辑不进入 Sidecar；元数据改用 SQLite；向量存储使用嵌入式 LanceDB；文档解析覆盖 PDF、Word、Excel 和常见图片；向量化使用 BGE Embedding；检索结果进入 rerank；同时提供上传、状态、查询、删除、重建和统计等索引管理接口。
+本次裁剪后的边界：原有 backend/ 的多用户鉴权与远程业务逻辑不进入 Sidecar；数据存储统一使用 PostgreSQL（元数据 + 向量，向量用 pgvector）；文档解析覆盖 PDF、Word、Excel 和常见图片；向量化使用 BGE Embedding；检索结果进入 rerank；同时提供上传、状态、查询、删除、重建和统计等索引管理接口。
 
 # 2. 术语与角色
 
@@ -48,15 +48,15 @@ Desktop App
         ├─ Chunker
         ├─ BGE Embedding
         ├─ Reranker
-        ├─ SQLite Metadata Store
-        └─ LanceDB Vector Store
+        ├─ PostgreSQL Metadata Store
+        └─ PostgreSQL Vector Store (pgvector)
 ```
 
 - Sidecar MUST 只监听 loopback，不暴露到局域网或公网。
 
-- Sidecar MUST 自主管理 SQLite 与 LanceDB 的初始化、版本迁移和损坏检测。
+- Sidecar MUST 自主管理 PostgreSQL 的初始化、schema 版本迁移与连接健康检测。
 
-- Client SHOULD 将 Sidecar 视为独立服务，不直接读写其 SQLite/LanceDB 文件。
+- Client SHOULD 将 Sidecar 视为独立服务，不直接读写其 PostgreSQL 数据库。
 
 - 上传/重建属于异步任务；查询/状态/健康检查属于同步请求。
 
@@ -126,7 +126,7 @@ READY
 | PARSING | 提取文本、表格、图片文字/结构 | 否 |
 | CHUNKING | 切片并生成定位元数据 | 否 |
 | EMBEDDING | 计算 BGE 向量 | 否 |
-| INDEXING | 写入 LanceDB 与索引元数据 | 否 |
+| INDEXING | 写入 PostgreSQL 向量与索引元数据 | 否 |
 | READY | 已完成并可参与查询 | 是 |
 | FAILED | 处理失败，可查看错误并重试 | 否 |
 | DELETING | 正在删除索引/元数据/文件 | 否 |
@@ -212,7 +212,7 @@ HTTP/1.1 200 OK
 
 **GET /ready**
 
-就绪检查。用于判断 SQLite、LanceDB、Embedding/Rerank 组件是否可接受业务请求。
+就绪检查。用于判断 PostgreSQL、Embedding/Rerank 组件是否可接受业务请求。
 
 **响应示例**
 
@@ -221,8 +221,8 @@ HTTP/1.1 200 OK
   "ok": true,
   "data": {
     "ready": true,
-    "sqlite": "ok",
-    "lancedb": "ok",
+    "postgres": "ok",
+    "pgvector": "ok",
     "embedding": "loaded",
     "reranker": "loaded"
   }
@@ -341,7 +341,7 @@ HTTP/1.1 202 Accepted
 
 **DELETE /documents/{document_id}**
 
-删除文档。删除必须同时覆盖原文件、SQLite 元数据、Chunk 记录与 LanceDB 向量。
+删除文档。删除必须同时覆盖原文件、PostgreSQL 元数据、Chunk 记录与 pgvector 向量。
 
 **参数**
 
@@ -521,7 +521,7 @@ HTTP/1.1 202 Accepted
 
 **POST /indexes/rebuild**
 
-全量重建知识库索引。一般用于数据库结构迁移、Embedding 模型升级或 LanceDB 索引损坏恢复。
+全量重建知识库索引。一般用于数据库结构迁移、Embedding 模型升级或 pgvector 索引损坏恢复。
 
 **请求示例**
 
@@ -564,7 +564,7 @@ HTTP/1.1 202 Accepted
 
 **POST /indexes/compact**
 
-可选维护接口：压缩/优化 LanceDB 数据文件。
+可选维护接口：压缩/优化 PostgreSQL/pgvector 数据文件。
 
 **响应示例**
 
@@ -613,7 +613,7 @@ HTTP/1.1 202 Accepted
 | 422 | EMPTY_DOCUMENT | 解析后无可索引文本 |
 | 500 | INTERNAL_ERROR | 未分类内部异常 |
 | 503 | MODEL_NOT_READY | Embedding/Reranker 尚未加载或加载失败 |
-| 503 | STORAGE_UNAVAILABLE | SQLite/LanceDB 不可用 |
+| 503 | STORAGE_UNAVAILABLE | PostgreSQL 不可用 |
 | 507 | INSUFFICIENT_STORAGE | 磁盘空间不足 |
 
 message 面向开发者，应该稳定、清晰；details 可包含阶段、原始异常类型、文档 ID 等诊断信息，但不应泄露本机绝对路径、隐私数据或完整堆栈。完整 traceback 写本地日志。
@@ -633,19 +633,19 @@ message 面向开发者，应该稳定、清晰；details 可包含阶段、原�
 
 - 重建索引时使用“新索引完成后再切换”的 replace 策略，避免查询过程中出现半旧半新数据。
 
-- 解析后的纯文本可选择落 SQLite/独立缓存文件；但 API 不依赖其具体存储方式。
+- 解析后的纯文本可选择落 PostgreSQL/独立缓存文件；但 API 不依赖其具体存储方式。
 
 - 图片/OCR 功能如果未打包模型，应在 /version 或 capabilities 中明确报告 disabled，而不是静默失败。
 
 # 11. Embedding、向量库与 Rerank 约定
 
-Embedding 与 rerank 模型名称允许通过配置文件切换。接口层只暴露模型标识和版本，不把向量维度等底层细节泄露给调用方。推荐的处理链为：Query normalize → BGE query embedding → LanceDB top-k 召回 → 元数据过滤 → rerank → 阈值裁剪 → 返回 Citation。
+Embedding 与 rerank 模型名称允许通过配置文件切换。接口层只暴露模型标识和版本，不把向量维度等底层细节泄露给调用方。推荐的处理链为：Query normalize → BGE query embedding → pgvector top-k 召回 → 元数据过滤 → rerank → 阈值裁剪 → 返回 Citation。
 
 ```
 query
   → normalize
   → embedding(query)
-  → LanceDB vector search (top_k=20)
+  → pgvector vector search (top_k=20)
   → metadata/document filters
   → rerank(query, candidate_chunks)
   → top 6
@@ -654,11 +654,11 @@ query
 
 - 同一知识库中的向量必须由同一 embedding model/version 生成；模型变化必须触发重建。
 
-- SQLite 中建议记录 embedding_model、embedding_dim、chunker_version、parser_version、index_generation。
+- PostgreSQL 中建议记录 embedding_model、embedding_dim、chunker_version、parser_version、index_generation。
 
 - Reranker 失败时可配置 fail-open：退化到向量得分，同时在响应 meta 中返回 rerank_degraded=true；是否允许退化由产品决定。
 
-# 12. SQLite 元数据建议 Schema
+# 12. PostgreSQL 元数据建议 Schema
 
 | **表** | **关键字段** | **用途** |
 | --- | --- | --- |
@@ -668,7 +668,7 @@ query
 | settings | key, value_json, updated_at | 本地配置与 schema/model 版本 |
 | index_generations | id, embedding_model, chunker_version, created_at, active | 索引代次，用于原子切换 |
 
-LanceDB 中每条记录至少需要：chunk_id、document_id、vector、必要过滤字段（例如 tags 或 project_id）和 index_generation。正文可存 LanceDB，也可只存 SQLite；如果分开存储，查询时需避免 N+1 读。
+pgvector 中每条记录至少需要：chunk_id、document_id、vector、必要过滤字段（例如 tags 或 project_id）和 index_generation。正文可与向量同表存储，也可单独存储；若分开存储，查询时需避免 N+1 读。
 
 # 13. 配置文件约定
 
@@ -682,8 +682,8 @@ request_timeout_sec = 60
 
 [storage]
 data_dir = "<app-data>/rag-sidecar"
-sqlite_file = "metadata.db"
-lancedb_dir = "lancedb"
+database_url = "postgresql://rag:rag@127.0.0.1:5432/rag"
+# pgvector 扩展在启动迁移时自动创建
 
 [upload]
 max_file_mb = 200
@@ -716,9 +716,9 @@ rerank_top_k = 6
 
 3. 主程序循环调用 /health；进程存活后调用 /ready。只有 ready=true 才开放知识库 UI。
 
-4. Sidecar 启动期间完成数据库迁移、LanceDB 打开和模型加载；耗时操作不得阻塞 /health。
+4. Sidecar 启动期间完成数据库迁移、pgvector 初始化（扩展/索引）和模型加载；耗时操作不得阻塞 /health。
 
-5. 主程序退出时先向 Sidecar 发送正常终止信号或直接终止子进程；Sidecar 必须能安全关闭 SQLite/LanceDB。
+5. 主程序退出时先向 Sidecar 发送正常终止信号或直接终止子进程；Sidecar 必须能安全关闭 PostgreSQL 连接池与 pgvector 连接。
 
 6. PyInstaller 采用 one-file 或 one-folder 均可；若模型体积大，推荐 one-folder 或外置只读模型目录，减少每次启动解包开销。
 
@@ -745,11 +745,11 @@ rerank_top_k = 6
 
 - 上传和查询可并发；同一 document_id 的 delete/reindex 应互斥。
 
-- SQLite 开启 WAL 模式，设置 busy_timeout，避免查询与状态更新互相阻塞。
+- PostgreSQL 采用连接池与合适的事务隔离，设置 statement_timeout / lock_timeout，避免查询与状态更新互相阻塞。
 
 - 异步任务必须持久化 Job 状态；Sidecar 异常退出后，启动时将 RUNNING 任务恢复为 FAILED/INTERRUPTED 或按策略继续。
 
-- DELETE 操作必须对 SQLite 与 LanceDB 采用可恢复流程；若部分删除失败，状态保持 DELETING/FAILED 并允许重试。
+- DELETE 操作必须对 PostgreSQL（元数据与向量）采用可恢复流程；若部分删除失败，状态保持 DELETING/FAILED 并允许重试。
 
 - 重建索引采用 generation 或临时表机制，完成后原子切换 active generation；切换前旧索引继续服务。
 
