@@ -1,274 +1,342 @@
-# 无隅文档与工业知识检索架构及历史资产复用设计
+# 无隅 BizBuddy 知识架构与知识图谱构建设计
 
-RAG Knowledge Architecture and Legacy Reuse
+RAG Knowledge Architecture and Knowledge Graph Construction
 
 | 项 | 内容 |
 |---|---|
-| Status | Draft v2（待 Review） |
-| Owner | 徐简（模块 C 成员：任伟 @徐简 @王俊仡） |
-| Reviewers | 任伟、潘云泓、王俊仡、yth152（agent-kernel） |
-| Related Documents | `docs/RAG_Sidecar_API_协议_v1.0.md`（任伟，PR #3，branch `docs/rag-sidecar-api`，PostgreSQL/pgvector 版）；`docs/agent-kernel-interface-protocol.md`、`docs/bizbuddy-agent-kernel-design.md`（yth152，branch `docs/agent-kernel-interface-protocol`）；`docs/MVP_Client_Tech_Design.md`、`docs/MVP_Task_Breakdown.md`；legacy `docs/RAG_Design.md`（徐简，2026-06-23）；`docs/RAG_Retrieval_Quality_and_Acceptance.md`（本文档姊妹篇） |
-| 修订记录 | v2（2026-09-02）：回应 bakey review——移除 Profile A（桌面本地）形态，RAG 统一部署企业私服；存储直接采用 PostgreSQL/pgvector，撤销跨存储抽象设计。v1（2026-09-01）：初稿 |
+| Status | Draft |
+| Owner | 徐简（模块 C：任伟 @徐简 @王俊仡） |
+| Reviewers | 潘云泓、任伟、王俊仡、yth152（agent-kernel）、张一（领域 Skill） |
+| Related Documents | `docs/RAG_Sidecar_API_协议_v1.0.md`（任伟，RAG 服务 HTTP 协议）；`docs/agent-kernel-interface-protocol.md`、`docs/bizbuddy-agent-kernel-design.md`（yth152，Agent 内核协议）；`docs/MVP_PRD.md`、`docs/MVP_Client_Tech_Design.md`、`docs/MVP_Task_Breakdown.md`；`docs/RAG_Retrieval_Quality_and_Acceptance.md`（姊妹篇：质量与验收） |
 
 ---
 
 ## 1. Scope（范围）
 
-本文档回答一个任伟的 Sidecar API 协议（v1.0）刻意没有回答、当前也无人回答的问题：
+本文档定义 BizBuddy 的**知识层设计**——不是接口层，也不是实现层：
 
-> **无隅 BizBuddy 的"知识"从哪里来、有几类、分别活在哪里、Agent 如何区分使用、一期工程（68.8M 向量库 + 知识图谱）的历史资产在 MVP/V1/V2 中各自如何复用。**
+> 企业的知识从哪里来、按什么结构组织、知识图谱如何在客户语料上从零构建、检索链路如何组合、选用哪些模型、知识边界如何保证。
 
 具体包含：
 
-- 双知识源架构：Local Private RAG 与 Industrial Knowledge RAG 的边界与协作
-- 部署形态（企业私服）与存储选型
-- 知识边界（knowledge scope）与数据安全原则
-- 跨知识源统一 provenance（引用）最小模型
-- 历史资产（BGE-M3、68.8M pgvector、MMR、聚类路由、GraphRAG-Lite、/hybrid_search 等）复用矩阵
-- 知识图谱（KG）的明确决策
-- Embedding / Reranker 选型依据
+- 知识归属与部署形态、知识分层与边界规则
+- 知识构建管线（语料 → 解析切分 → 索引 → 检索）的知识层要求
+- 知识图谱的 Schema、构建管线、质量门槛与检索挂载方式
+- Embedding / Reranker / 抽取侧模型选型依据与验证要求
+- 跨知识类型的统一引用（provenance）模型
 
-## 2. Non-goals（非目标）
+### Non-goals（非目标）
 
-- **不定义 Sidecar HTTP API**——路径、字段、状态机、错误码以 `RAG_Sidecar_API_协议_v1.0.md` 为唯一权威，本文档只引用。
+- **不定义 RAG 服务 HTTP API**——路径、字段、状态机、错误码以 `RAG_Sidecar_API_协议_v1.0.md` 为唯一权威，本文档只引用。
 - **不定义 `doc_search` 工具契约**——以 `agent-kernel-interface-protocol.md` 与 `bizbuddy-agent-kernel-design.md` 为准。
 - **不定义质量指标与验收方法**——见姊妹篇 `RAG_Retrieval_Quality_and_Acceptance.md`。
-- **不涉及 DCS 时序数据链路**（模块 D）与前端展示（模块 E/F）。
-- 本文档是设计文档，不附带任何实现代码。
+- 不涉及 DCS 时序数据链路（模块 D）与前端展示（模块 E/F）。
+- 本文档是设计文档，不附带实现代码。
 
-## 3. Background（背景）
+---
 
-### 3.1 一期遗产（服务器侧，2026-06 至 2026-08）
+## 2. 知识架构总览
 
-一期"工业智能体服务产品"在服务器（地址见运维文档）上沉淀了：
+### 2.1 知识归属：企业统一构建，逐客户独立
 
-| 资产 | 规模/状态 |
-|---|---|
-| `chunks` 表（pgvector + 175GB ivfflat，BGE-M3 1024d） | 68,804,002 条，五个来源（html_md / pt_md / arxiv / MDS / chemrxiv） |
-| 向量检索链路（`rag/` 模块：probes 调优使查询 3–12s → 0.2–0.4s、MMR、MiniBatchKMeans 聚类路由、FastAPI） | 已 push 旧仓库，设计记录于 legacy `docs/RAG_Design.md` |
-| Industrial GraphRAG-Lite（`kg_lite` schema） | 双语版 `kg_bilingual_v3_20260722_144843`：9,448 实体 / 60.8M mentions / 29,982 边 / 348 中英别名 |
-| `/hybrid_search` API（:8011，tmux `kg-api`） | 向量 + KG 实体链接 + 图扩展 + RRF（KG 权重 2.0）+ MMR + vector-only fallback；2026-09-01 实测存活 |
-| `industrial_knowledge_search` Skill adapter | 服务器 `/data/gufei_vec/skills/`，待 review |
+BizBuddy 部署在客户企业内网。产品交付的是**把企业自己的文档变成可检索、可引用的知识**的构建能力与架构，不预置、不分发任何外部数据集。
 
-### 3.2 二期现状（MVP，2026-08-31 起）
+由此确定三条基本约定：
 
-MVP 转向 BizBuddy 产品（`MVP_PRD.md`）：企业**私有文档** RAG + 云端 LLM。模块 C 分工为任伟 @徐简 @王俊仡三人。部署形态在 review 中已定调（bakey 对任伟 PR #3 的逐行 review，2026-09-02）：**私有云形态——service + RAG 服务 + PostgreSQL 同 pod 容器化部署，桌面端不直连 RAG 服务，统一经 service 转发**；存储统一 PostgreSQL/pgvector（任伟 PR #3 已按此修订协议）。本文档 v2 与该定调对齐。
+1. **知识库以企业为单位统一构建，不以员工个人为单位。** 制度、规程、许可证、台账本就是企业统一资产；逐人一套既无必要，单个员工也不具备支撑独立索引与图谱构建的语料量。个人/部门级知识空间列为后续规划（§8）。
+2. **客户间完全隔离。** 客户 A 的语料、索引、图谱不出现在客户 B 的任何部署中；不存在跨客户的共享知识层，也不存在把客户语料回流到平台的通道。
+3. **全链路可在无外网的企业内网运行。** 不依赖任何需要联网访问的外部知识服务；模型权重随交付物本地化，不在运行期联网下载。
 
-**缺口**：任伟的协议定义了"私有文档 RAG 服务如何工作"，但以下问题在全部现有材料（main、complement、kernel 分支 + 本地 Doc/ + 0901 飞书）中均无人覆盖：
-
-1. 私有文档知识和公共工业知识是不是同一个服务？Agent 怎么区分？
-2. 一期 68.8M 知识库和 KG 在新产品里放在哪、用不用、什么时候用？
-3. 客户私有文档如何保证不与公共知识混库？
-
-## 4. Problem Statement（问题陈述）
-
-> Agent 内核（模块 B）目前只定义了 `doc_search` 一个知识工具，指向私有文档 RAG 服务。产品的一期价值（68.8M 工业文献 + KG）在新架构中没有位置。缺少一份**知识层面**（而非 API 层面）的架构决策，模块 C 三个人会在"RAG 服务要不要顺便接工业知识库"、"知识边界怎么划"这类问题上各自发挥，最终产生两套不兼容的实现。
-
-## 5. Architecture（总体架构）
-
-### 5.1 双知识源模型
-
-```
-                    Agent Kernel (B)
-                         │
-            ┌────────────┴──────────────┐
-            │                           │
-      doc_search              industrial_knowledge_search
-      （已有契约）                （新增 Tool，V1 启用）
-            │                           │
-            ▼                           ▼
- Private Document RAG        Industrial Knowledge Service
- （客户自己的文档）           （公共/企业共享工业知识）
-            │                           │
- 企业私服（service 同 pod）    服务器侧服务（复用一期资产）
- PostgreSQL + pgvector        PostgreSQL/pgvector (68.8M)
- （任伟协议 PR #3）            + kg_lite 知识图谱
-                              + /hybrid_search API
-```
-
-**核心决策 D1——两个服务，两个工具，不合并：**
-
-| 维度 | Private Document RAG（doc_search） | Industrial Knowledge RAG（industrial_knowledge_search） |
-|---|---|---|
-| 数据主权 | 客户私有，永不出企业私服 | 平台侧公共知识，或企业采购的共享知识包 |
-| 数据内容 | 制度、规程、许可证、台账——小（百级文档）、高频更新 | 文献、政策、标准——大（千万级 chunk）、低频更新 |
-| 部署 | 企业私服（service + RAG 服务同 pod，任伟协议 PR #3 §14） | 独立的服务端服务（现有一期服务器，或后续企业版部署） |
-| 检索 | 纯向量 + rerank（任伟协议 v1.0） | 向量 + KG 混合（复用 /hybrid_search） |
-| Agent 判断依据 | 制度/流程/许可证/台账类问题 | 行业技术、工艺机理、政策标准类问题；本企业文档查不到时 |
-
-**理由**：数据主权边界不同（见 §9）、规模差 5 个数量级（千级 chunk vs 68.8M）、更新节奏不同、检索算法不同（KG 只对公共知识有意义——客户私有文档量级支撑不了图构建）。合并成一个服务会在安全、性能、算法三方面同时变差。
-
-**Agent 如何区分**：内核 Persona（模块 B 的安环专家 prompt）已有"先查企业文档"的规则；V1 增加 `industrial_knowledge_search` 工具后，prompt 约定补一条："企业文档无相关内容，或问题属于行业技术/政策标准类时，调用工业知识检索"。工具选择是模型行为，**不需要**新路由模块。
-
-### 5.2 DeepSeek Harness（dsh）的边界
-
-明确技术事实，防止把 RAG 塞进内核：
-
-```
-User → Electron/UI → Agent Kernel(B) → dsh/Adapter → Tool calls
-                                                ├─ doc_search        → Sidecar (C)
-                                                ├─ ts_query/ts_list  → Collector (D)
-                                                └─ industrial_…      → 远端知识服务 (V1)
-```
-
-**RAG 是 Agent Kernel 通过 Tool 调用的能力**。embedding、向量库、KG、rerank 全部住在 Tool 背后的服务里（Sidecar / 远端知识服务），不进 dsh 插件层，也不进内核适配层。内核只做：发起调用、透传流式事件、传递 Citation。这与 yth152 已实现的架构一致，本文档予以确认而非更改。
-
-## 6. 阶段演进（MVP / V1 / V2）
-
-| 阶段 | Private RAG | Industrial Knowledge | 依据 |
-|---|---|---|---|
-| **MVP**（12 周窗口） | RAG Service（任伟协议 v1.0），企业私服形态 | **不接入产品**；一期服务继续在服务器上作为团队内部实验/演示（:8011） | MVP 验收只含私有文档问答（PRD 流程 1/2）；远端知识服务涉及平台级安全评审与 SLA，超出 MVP 范围 |
-| **V1**（对应 PRD 的 V1.1–V1.3 窗口） | 企业私服多租户完善（隔离粒度、容量规划） | 新增 `industrial_knowledge_search` Tool，调用 /hybrid_search 的收敛建议版；评估"知识包"离线分发 | 内部试用反馈驱动；工业知识是产品差异化卖点，一期资产的回报点；KG 随本阶段进入（PRD V1.3 规划"引入知识图谱"） |
-| **V2** | 与 Industrial Knowledge 统一运维 | KG 能力面向前端可视化（实体/关系/社区摘要）；企业版可将自有知识并入图谱 | 深化企业版差异 |
-
-> MVP 不接入 ≠ 废弃。一期资产在 MVP 期间照常运行维护，作为 V1 的现成后端（见 §8 复用矩阵）。
-
-## 7. 部署形态与存储选型
-
-### 7.1 单一部署形态：企业私服（v2 定调）
-
-~~v1 曾设计 Profile A（桌面本地 SQLite/LanceDB）/ Profile B（企业私服 PG）双形态。~~ **按 bakey review（2026-09-02）移除桌面本地形态**：RAG 只部署在企业私服内，不再随安装包分发到客户端。
+### 2.2 部署形态
 
 | 项 | 约定 |
 |---|---|
-| 形态 | 私有云容器化：service + RAG 服务 + PostgreSQL 同 pod（对齐 bakey 对任伟 PR #3 的 review） |
-| 调用链 | 桌面端（Electron）不直连 RAG 服务，统一经 service 转发；原 loopback/X-Sidecar-Token 安全模型在 pod 内 localhost 通信下自然成立 |
+| 形态 | 私有云容器化：service + RAG 服务 + PostgreSQL 同 pod |
+| 调用链 | 桌面端（Electron）不直连 RAG 服务，统一经 service 转发。RAG 服务只服务同 pod 的 service |
+| 进程边界 | 同 pod 内容器共享 network namespace，RAG 服务继续绑 loopback 并校验 `X-Sidecar-Token`（任伟协议 §5）即成立。**"同 pod"是该安全模型的显式前提**；若 RAG 拆为独立 Deployment，须改为服务间双向 TLS |
 | 元数据 | PostgreSQL |
-| 向量 | pgvector + ivfflat（与一期 68.8M 同构，调优经验直接复用） |
-| 交付 | 容器镜像（基础镜像、模型打入镜像还是挂载卷，随任伟协议冻结参数确定） |
-| 鉴权 | 认证与用户体系在 service 层（uploader 归属是共享知识库刚需）；RAG 服务本身无账号体系，只服务同 pod 的 service |
+| 向量 | pgvector + ivfflat |
+| 图谱 | 同一 PostgreSQL 实例内独立 schema，与元数据同生命周期备份 |
+| 鉴权 | 认证与用户体系在 service 层；RAG 服务本身无账号体系 |
+| 交付 | 容器镜像；模型打入镜像还是挂载只读卷，随任伟协议冻结参数确定 |
 
-> 附带影响提示（超出本文档范围，建议团队层面对齐）：RAG 上私服后，客户端成为瘦客户端；`MVP_PRD.md` 中"产品运行在用户本地电脑、文档/向量索引本地存储"的表述以及模块 D（DCS 采集）、离线行为、安装包体积等 PRD 条款需要相应修订，由 owner 统筹。
+### 2.3 知识分层：一个知识库，一个分类维度
 
-### 7.2 存储选型：直接 PostgreSQL/pgvector，不做跨存储抽象
+企业语料并非同质。BizBuddy 用一个元数据字段 `doc_class` 区分三类，而**不拆成多个服务或多套存储**：
 
-v1 曾为"桌面→私服迁移"设计 MetadataStore/VectorStore 等跨存储接口。**形态统一后该动机消失**：
+| doc_class | 内容 | 为什么要区分 |
+|---|---|---|
+| `enterprise_policy` | 企业制度、规程、作业指导书、应急预案 | 回答合规问题时要能说清依据的是"厂内规定"还是"法定要求"——两者冲突时优先级不同 |
+| `external_regulation` | 法律法规、国标行标、许可证与批复（**由企业自行导入**） | 条款型文本，切分与引用定位要求最严（须精确到条/款） |
+| `operation_record` | 台账、运行记录、检测报告 | 时效性强、结构化程度高，更新频率与前两类差一个量级 |
 
-- 私有文档库与一期 68.8M 知识库同为 PostgreSQL + pgvector，**同一套运维、同一套调优经验、同一支团队技能栈**；
-- 不再需要"换存储引擎"的抽象层——直接使用 pgvector，代码组织保持普通 repository/module 分层即可（这是实现风格，不是架构约束，归任伟协议 §12）；
-- 唯一保留的接口性要求：**SQL 方言与 pgvector 特性不泄漏到 API 层**（任伟协议 §11 已约定），未来如需兼容其他向量引擎再引入抽象，届时另出设计。
+`doc_class` 的三个用途：①引用卡片可标注来源性质；②不同类别适用不同的解析/切分策略与质量门槛（见姊妹篇）；③检索时可按类别过滤或加权。
 
-## 8. 历史资产复用矩阵
+**这是一个字段，不是一次服务拆分。** 存储、索引、检索链路、API 全部单套——拆分会同时增加部署重量、故障面和 Agent 的工具选择负担，而三类文档在数据主权与规模上并无差异。
 
-| Legacy Asset | 当前状态 | MVP 复用？ | 如何复用 | 是否改造 | Later |
-|---|---|---|---|---|---|
-| BGE-M3 embedding | 服务器生产 + RAG 服务协议指定 | ✅ | RAG 服务 `[embedding].model = BAAI/bge-m3`（任伟协议 §13） | 否（模型不动，重嵌入成本极高是一期已确认的约束） | 多语言更新版评估 |
-| 68.8M pgvector 库 | 服务器 `pg-gufei-vec`，只读红线 | ❌ 不进 MVP | 作为 Industrial Knowledge Service 的数据底座，V1 经 `/hybrid_search` 供数 | 增量更新管线（任伟数据线） | 知识包子集离线分发 |
-| ivfflat + probes 调优经验 | 服务器，P95 3–12s→0.4s | ✅ 间接 | 企业私服部署手册直接引用调优参数（私有文档库与一期同为 pgvector） | 否 | HNSW 对比 |
-| MMR 多样性重排 | 服务器 hybrid 链路 + 旧 `rag/` 模块 | ✅ | RAG 服务 rerank 之上的可选多样性层（接口位保留，配置默认关） | 改造为纯 numpy | V1 打开 |
-| 聚类路由（MiniBatchKMeans） | 服务器 `rag/clusterer.py` | ❌ | 私有文档库规模（千级文档/chunk）不需要 | — | 大库可复用 |
-| GraphRAG-Lite（实体/mention/边/社区） | 服务器 `kg_lite`，双语 v3 | ❌ 不进 MVP | V1 作为 Industrial Knowledge 的增强检索层 | 见 §8.1 KG 决策 | 企业自有知识入图 |
-| entity linker（词典+别名+最长匹配） | 服务器 kg/retrieval | ❌（随 KG） | V1 随 `/hybrid_search` 复用 | 抽象为独立包 | 前端实体高亮复用 |
-| KG evidence retrieval | 服务器 kg/retrieval | ❌（随 KG） | 同上 | 同上 | citation 增加图谱路径来源 |
-| RRF Hybrid 融合（KG 权重 2.0） | 服务器 hybrid_api | ❌ | V1 `industrial_knowledge_search` 的核心算法 | 权重网格化重校（2.0 为手动经验值） | — |
-| `/hybrid_search` API（:8011） | 服务器 tmux 运行中 | ❌ | V1 的远端服务原型，直接在其上收敛 API 面 | 加鉴权/限流/稳定字段；密码清理后开源 | 企业版部署 |
-| `industrial_knowledge_search` Skill adapter | 服务器 skills/ | ❌ | V1 演进为内核 Tool 插件（对齐 yth152 的 tool 协议） | SKILL.md → dsh tool 注册 | — |
-| 80 条评测集与报告 | 服务器 reports/ | ❌ | 种子素材，按姊妹篇质量规范重建为固定回归基准 | 结构化为 jsonl + gold | 持续扩充 |
-
-> 图谱相关资产"不进 MVP"不是放弃：`MVP_PRD.md` V1.3 明确规划 KG；本矩阵给每个资产标注了后续入口，避免"没人认领"的漂移。
-
-### 8.1 KG 决策（明确回答）
-
-**MVP 暂不启用，定位为"远端公共工业知识服务的检索增强 + 独立 Tool"，不作为 `doc_search` 的内部实现。**
-
-理由：
-
-1. **数据匹配度**：一期 KG 从公共文献构建，语义上属于 Industrial Knowledge，不属于任何客户的私有文档；把它塞进 doc_search 会模糊 §9 的知识边界。
-2. **服务边界**：KG 与私有文档库虽同在企业服务端（PostgreSQL），但分属两个服务、两个 scope（§5.1 D1）；把 60.8M mentions 级图谱耦合进每个客户的私有 RAG 实例，徒增部署重量与故障面。
-3. **质量现状**：图密度 0.06% 导致社区检索关闭、RRF KG 权重 2.0 为手动经验值、KG Useful Rate 在 80 条评测中未形成稳定优势结论——在质量规范（姊妹篇）给出回归证据前，不进入产品主链路。
-4. **正确的挂载点**：V1 的 `industrial_knowledge_search` Tool 内部做 vector+KG 混合（复用 /hybrid_search），对 Agent 和前端只暴露统一的 citation——KG 是实现细节，不是产品概念。
-
-## 9. 数据安全与知识边界
-
-### 9.1 Knowledge Scope 分级
-
-| Scope | 定义 | 存储 | 谁可写 |
-|---|---|---|---|
-| `tenant-private` | 企业私服内的客户文档（默认 scope；按用户/部门的细粒度隔离为 V1.1+ 项） | 企业私服 PostgreSQL | 该企业用户（经 service 认证） |
-| `organization` | 集团/行业共享知识包 | 企业私服独立库或平台分发 | 平台运营 |
-| `public-industrial` | 平台公共工业知识 | 平台中心服务器（68.8M + KG） | 平台数据线（任伟） |
-
-> v1 曾含 `private`（单客户本机）一级，随桌面本地形态移除而并入 `tenant-private`。
-
-### 9.2 强制规则
-
-1. **客户私有文档默认不得自动上传**到 `organization`/`public-industrial` 任何一级。上传需显式企业级配置且逐文档确认，MVP 不提供该功能。
-2. **不同 scope 不混库**：Private RAG 与 Industrial Knowledge 是两个服务（§5.1 D1），物理隔离先行；企业私服内部的多租户隔离是 V1.1 设计项。
-3. **查询不串扰**：`doc_search` 只查 `tenant-private`；`industrial_knowledge_search` 只查 `organization`/`public-industrial`。工具结果携带 `knowledge_scope` 字段（见 §10），前端可据此区分"你的制度"与"行业资料"。
-4. 私有文档内容不出现在远端知识服务的日志/遥测中；远端知识服务只接收查询文本，不接收私有文档内容。
-
-## 10. 跨知识源统一 Provenance（引用最小模型）
-
-**不改动**任伟协议的 Sidecar citation（document/page/sheet/section/cell_range/chunk_index）与 yth152 的内核 Citation 类型（citationId/documentId/documentName/page?/chunkId/content/score?）。在其上定义跨源扩展字段：
+### 2.4 与 Agent 内核、RAG 服务的职责边界
 
 ```
-Provenance（统一引用最小模型）
-├─ knowledge_source     # "local_rag" | "industrial_kg" | "industrial_vector" | "dcs"
-├─ knowledge_scope      # §9.1 三级
-├─ document_id / chunk_id / source_type / title
-├─ page / sheet / section          # 沿用 Sidecar 定位字段
-├─ retrieval_channel    # "vector" | "kg_evidence" | "hybrid"
-└─ graph_path?          # 仅 KG 来源：实体关系路径（如 dioxin —CONTROLLED_BY→ 活性炭喷射）
+User → Electron/UI → Agent Kernel(B) → dsh/Adapter → Tool calls
+                                            ├─ doc_search       → RAG 服务 (C)
+                                            └─ ts_query/ts_list  → Collector (D)
 ```
 
-兼容性：RAG 服务的 citation 增加 `knowledge_source="local_rag"`、`knowledge_scope` 两个可选字段即满足（v1 内新增可选字段是兼容变更，任伟协议 §19）；内核 Citation 的 `content`/`score` 不变。目标：**私有文档、远端向量、KG Evidence、（未来）DCS 的引用在同一张引用卡片里统一渲染**，前端按 `knowledge_source` 决定图标与跳转。
+- **`doc_search` 是知识侧唯一工具。** 不引入第二个知识工具，Agent 无需在多个知识源之间做选择，也就不需要路由模块。
+- **RAG 是 Agent Kernel 通过 Tool 调用的能力。** embedding、向量库、图谱、rerank 全部住在 Tool 背后的 RAG 服务里，不进 dsh 插件层，也不进内核适配层。内核只负责发起调用、透传流式事件、传递 Citation。这与 yth152 已实现的架构一致，本文档予以确认。
 
-## 11. Embedding / Reranker 选型依据（补 0831 review 要求）
+---
 
-| 组件 | 选择 | 依据 | 备选与否决理由 |
-|---|---|---|---|
-| Embedding | BAAI/bge-m3（1024d） | ①一期 68.8M chunks 已用其嵌入，复用即兼容（重嵌入成本一期已论证不可接受）；②中英双语，匹配安环场景中文制度+英文文献混合；③MTEB/中文 C-MTEB 长期靠前，社区部署成熟；④RAG 服务与远端知识服务同模型，未来跨源语义对齐零成本 | OpenAI text-embedding：联网依赖+私有文档外发违规；bge-large-zh：英文弱，与一期不兼容 |
-| Reranker | BAAI/bge-reranker-v2-m3 | ①cross-encoder 精度显著优于纯向量分（一期评测 rerank gain 见质量文档基线）；②同双语同家族，部署心智一致；③CPU 可推理（降低 GPU 依赖，适配私服容器资源约束）；④一期服务器已验证 | ColBERT：内存/索引复杂度高；无 rerank：A/B 有明确 gain 损失 |
+## 3. 知识构建管线（知识层要求）
 
-选型变更流程：任何更换 → 触发 `index_generation` 重建（任伟协议 §19 已约束）→ 跑姊妹篇的回归基准 → 达标才切换。
+本节只规定"知识层面必须成立的性质"，具体接口与参数归任伟协议。
 
-## 12. Failure Handling / Security / Observability
+### 3.1 语料入库
+
+- 每份文档在入库时确定 `doc_class`（上传时指定，可后续修正），并记录来源、责任部门、生效/失效日期。
+- **失效文档必须可标记而不必删除**：EHS 场景里"当时依据的是哪一版制度"是可追溯性要求，回答默认只检索生效版本，历史版本可显式查询。
+- 同一文档的版本更替走"新版本入库 + 旧版本置为失效"，不做原地覆盖。
+
+### 3.2 解析与切分
+
+结构优先切分（任伟协议 §10 已给出默认参数），知识层追加三条要求：
+
+1. **条款完整性**：法规、国标、制度类文档以"条/款/项"为最小语义单元，切分不得从一条中间断开；条款编号必须保留在 chunk 文本内，否则引用无法定位。
+2. **表格不拆表头**：EHS 文档大量限值以表格承载，跨行切分必须重复表头，否则数值脱离指标名后无意义。
+3. **定位元数据完整**：每个 chunk 必须能回推到页/表/节/单元格区间（任伟协议 §7.2 已定义字段），这是引用可核验的前提。
+
+### 3.3 向量索引
+
+- pgvector + ivfflat。`probes` 是召回率与延迟之间的主调参，须在客户实际语料规模上标定，不沿用固定默认值。
+- 索引以 `index_generation` 版本化，重建走原子切换（任伟协议 §12），重建期间不出现半索引状态。
+- 同一知识库内的向量必须由同一 embedding model/version 生成；模型变更强制触发重建（任伟协议 §11、§19）。
+
+### 3.4 检索链路
+
+```
+query
+  → normalize（术语归一：中英别名、缩写还原，与索引侧同一份词表）
+  → ┌ 向量召回 (top_k)
+    └ 图谱证据召回（按 §4.5 门槛启用）
+  → RRF 融合
+  → rerank（cross-encoder）
+  → MMR 多样性重排（可选，默认关闭）
+  → top-N + citations
+```
+
+- 图谱通道是**并行召回通道**，不是向量结果的后处理。
+- **降级红线**：图谱通道超时、异常或图版本缺失，一律降级为 vector-only 并在响应 meta 标记，不得导致整体查询失败。
+- MMR 用于抑制同一文档连续多个近邻 chunk 占满 top-N；条款类查询上它有时会挤掉正确答案，因此默认关闭，按类别评估后再开。
+
+---
+
+## 4. 知识图谱构建设计
+
+### 4.1 定位与设计原则
+
+BizBuddy 的图谱不是通用百科图谱，而是**面向检索增强的轻量术语图**：把散落在不同文档里的同一对象（同一种危废、同一个工艺、同一项限值）串起来，解决三个纯向量检索解决不好的问题：
+
+1. **术语召回不稳定**——企业制度写"渗滤液"，国标写"垃圾渗滤液"，英文资料写 leachate；向量模型对短查询和专有名词的召回波动很大，别名表 + 实体链接是确定收益。
+2. **跨文档证据聚合**——"HW08 类废物如何贮存"的答案分散在贮存规程、台账制度、国标附录三处，向量 top-k 容易只命中其中一处。
+3. **引用可解释**——图路径可以作为"为什么给你这条证据"的理由呈现，而不只是相似度分数。
+
+三条设计原则：
+
+- **图服务于检索，不服务于生成。** 不做基于图的自然语言问答，图的产物只有一样：候选证据 chunk 及其关联路径。
+- **可复现优先于覆盖率。** 抽取以领域词典 + 规则为主，产物确定、可审计、可回归。不做全量 LLM 生成式抽取：成本随语料线性增长、同一语料两次跑结果不一致、幻觉实体一旦入图会持续污染检索。
+- **图是可选增强，不是主链路依赖。** 任何图侧故障必须能降级为纯向量检索（§3.4）。
+
+### 4.2 图 Schema（首版）
+
+实体类型：
+
+| 类型 | 说明 | 示例 |
+|---|---|---|
+| `Substance` | 物质、污染物、废物类别 | 二噁英、渗滤液、HW08 |
+| `Process` | 工艺、设备、处置方式 | 焚烧、活性炭喷射、安全填埋 |
+| `Regulation` | 法规、标准、许可条款 | GB 18485、排污许可证第 X 条 |
+| `Indicator` | 指标与限值参数 | 烟气含氧量、COD、停留时间 |
+| `OrgAsset` | 企业侧对象：装置、区域、岗位、台账主体 | 一号焚烧线、危废暂存间 |
+
+关系类型：
+
+| 关系 | 语义 | 来源 |
+|---|---|---|
+| `ALIAS_OF` | 别名、缩写、中英对照、异写 | 词典与别名表 |
+| `SUBCLASS_OF` | 类别归属 | 词典层级 |
+| `REGULATED_BY` | 物质/工艺受某标准或条款约束 | 模式规则 |
+| `MEASURED_BY` | 物质由某指标度量 | 模式规则 |
+| `TREATED_BY` | 物质由某工艺处置 | 模式规则 |
+| `CO_OCCURS` | 高频共现（弱关系，带权重） | 共现统计 |
+
+> Schema 首版规模刻意保持小。每增加一种关系类型，就需要配套一套抽取规则、一批标注样本和一条回归用例；扩展遵循"先出现真实查询需求 → 再加关系类型"的顺序，不预先铺开。
+>
+> `OrgAsset` 是企业侧特有类型，它把"厂内的一号焚烧线"与"焚烧工艺的国标要求"连起来——这是通用知识图谱给不了、只有在客户语料上现场构建才能得到的部分，也是图谱在本产品里的主要价值来源。
+
+### 4.3 构建管线
+
+```
+企业语料（已切分的 chunk）
+  ① 词典装载        基础领域词典 + 客户增补词典
+  ② 候选实体识别    最长匹配 + 规则/正则
+  ③ 上下文门控消歧  短词、歧义词、元素符号须有上下文证据才成立
+  ④ 别名归一        写入 ALIAS_OF，统一到规范实体 ID
+  ⑤ mention 落库    (entity_id, chunk_id, offset, confidence)
+  ⑥ 建边            模式规则 + 共现统计，按频次/共现显著性剪枝
+  ⑦ 版本化落库      graph_generation，与 index_generation 同机制原子切换
+```
+
+三个关键点：
+
+- **③ 是质量生死线。** 不做上下文门控，元素符号（C、He、In）、英文短词和二字中文词会产生大量假实体，一旦入图，图扩展会把不相关证据源源不断地拉进结果。门控规则 + stoplist 必须在首版就具备，且随词典一起版本化。
+- **⑥ 剪枝优于全连。** 共现边不设阈值会得到一张稠密噪声图，看起来"关系很丰富"，检索时反而更差。边必须带权重，且低于阈值的不入库。
+- **词典是可运营资产。** 基础词典（危废名录、常见工艺、常引国标）随产品交付；客户增补词典在实施阶段由现场维护。**词典更新触发 graph_generation 增量重建，不影响 index_generation**——两条版本线解耦，词典迭代不需要重跑向量索引。
+
+### 4.4 中英双语与术语归一
+
+EHS 语料的典型形态是中文制度 + 中文国标 + 英文技术资料混排。别名表承担三种归一：中英对照、缩写还原、同义异写。
+
+**术语归一必须在索引侧和查询侧使用同一份词表**，否则查询词与索引词对不齐，归一反而降低召回。词表版本随 `graph_generation` 一并记录。
+
+### 4.5 图质量约束与启用门槛
+
+图不是建出来就有收益。以下能力逐项设门槛，未达标不启用：
+
+| 能力 | 启用门槛 |
+|---|---|
+| 实体链接 + 别名召回 | 词典对目标语料的实体覆盖率达标即可启用——风险最低、收益最确定 |
+| 一跳图扩展 | 图密度与边置信度达标，**且**在固定回归基准上相对纯向量为正收益 |
+| 社区 / 子图摘要 | 社区划分稳定性达标。稀疏图上社区划分不可靠，达不到就不启用 |
+| RRF 中图谱通道权重 | 必须由回归基准调优后冻结，不得使用手工经验值 |
+
+门槛的度量方法与具体数值在姊妹篇《检索质量与验收规范》中定义。本文档只规定一条原则：**图谱的每一项能力都要有可回归的证据才能进入主链路，没有证据就保持关闭。**
+
+### 4.6 图谱在检索链路中的挂载
+
+- 位置见 §3.4：与向量并行召回，经 RRF 融合。
+- **对 Agent 和前端，图谱是实现细节。** `doc_search` 出参不区分证据来自哪个通道，只在 citation 里附 `retrieval_channel`，供前端可选展示。产品概念里没有"知识图谱"这个按钮。
+- 降级语义见 §3.4 降级红线。
+
+### 4.7 阶段安排
+
+| 阶段 | 图谱能力 |
+|---|---|
+| **MVP** | 领域词典 + 别名表 + 索引/查询双侧术语归一。**不构建完整图**——收益确定、成本低、对中文与中英混合召回有直接帮助，且不引入新的故障面 |
+| **下一阶段** | 完整实体 / mention / 边构建 + 一跳图扩展，按 §4.5 逐项开门槛 |
+| **后续** | 图谱可视化（实体与关系浏览）；部门 / 个人级知识空间；与 DCS 数据的联合引用 |
+
+---
+
+## 5. 模型选型与验证
+
+### 5.1 Embedding：`BAAI/bge-m3`（1024d）
+
+| 依据 | 说明 |
+|---|---|
+| 中英双语 | 直接匹配"中文制度 + 中文国标 + 英文技术资料"混排的实际语料形态 |
+| 长上下文 | 支持长输入，适配条款型长 chunk，不必为迁就模型窗口而过度切碎条款 |
+| 效果与成熟度 | MTEB / C-MTEB 长期靠前，社区部署方案成熟 |
+| 可本地化 | 权重可完整本地部署，满足 §6 无外网要求 |
+| 维度适中 | 1024 维在 pgvector + ivfflat 下，索引体积与检索延迟平衡合理 |
+
+否决项：OpenAI text-embedding 系列——需联网且企业文档外发，违反 §6.2；`bge-large-zh`——英文能力不足，无法覆盖英文标准与技术资料。
+
+### 5.2 Reranker：`BAAI/bge-reranker-v2-m3`
+
+| 依据 | 说明 |
+|---|---|
+| 精度 | cross-encoder 对条款类文本的精排收益显著优于纯向量分 |
+| 一致性 | 与 embedding 同双语同家族，部署与调优心智一致 |
+| 资源 | CPU 可推理，适配私服容器的资源约束，不强制要求 GPU |
+| 可降级 | 失败时可 fail-open 退化到向量分并在 meta 标记（任伟协议 §11） |
+
+否决项：ColBERT——索引与内存复杂度高，私服资源约束下不划算；不做 rerank——精排缺失，条款类查询的 top-N 精度损失明显。
+
+### 5.3 抽取侧
+
+- **词典最长匹配为主**，分词器（jieba / pkuseg 等）作为可选辅助。分词器必须支持无外网环境的离线安装，**不得成为硬依赖**——依赖装不上时，词典模式必须能独立工作。
+- **LLM 只用于离线扩充词典候选**，人工确认后入库；不进入在线抽取链路，理由见 §4.1 可复现原则。
+
+### 5.4 选型验证要求
+
+以上为**首版建议值，不是冻结值**。所有模型与关键参数（`top_k`、`rerank_top_k`、`probes`、chunk 尺寸、RRF 权重）必须在客户实际语料的固定回归基准上实测后冻结，方法、指标与门槛见姊妹篇。
+
+变更流程：更换 embedding → 触发 `index_generation` 重建（任伟协议 §19）；变更词典或图 Schema → 触发 `graph_generation` 重建；两者均须跑通回归基准才可切换。
+
+---
+
+## 6. 数据安全与知识边界
+
+### 6.1 知识范围（scope）
+
+| Scope | 定义 | 状态 |
+|---|---|---|
+| `tenant` | 企业内统一构建的知识库 | **MVP 启用，且为当前唯一** |
+| `department` / `personal` | 部门或个人私有知识空间 | 后续规划，MVP 不实现 |
+
+### 6.2 强制规则
+
+1. **知识不出企业私服。** 不存在向平台或其他客户回传语料、索引、图谱、mention 或**查询文本**的通道。查询文本本身即包含企业敏感信息，与文档正文同等对待。
+2. **全链路可无外网运行。** 模型权重、词典、依赖随交付物本地化，不在运行期联网下载。
+3. **日志与诊断不含正文。** 沿用任伟协议 §15 约束；图谱侧同此约定——mention 的上下文片段不写入日志与诊断包。
+4. **权限不用检索规则替代。** 在部门/个人级隔离引入前，知识库对该企业内经 service 认证的用户一致可见；细粒度权限属后续规划项，MVP 不以"检索时过滤"冒充访问控制。
+
+---
+
+## 7. 统一 Provenance（引用模型）
+
+**不改动**任伟协议的 citation（document / page / sheet / section / cell_range / chunk_index）与 yth152 的内核 Citation 类型（citationId / documentId / documentName / page? / chunkId / content / score?）。在其上定义可选扩展字段：
+
+```
+doc_class          # "enterprise_policy" | "external_regulation" | "operation_record"
+retrieval_channel  # "vector" | "kg" | "hybrid"
+graph_path?        # 仅图谱通道：实体关系路径，供前端可选展示
+doc_valid_status?  # "active" | "superseded"，配合 §3.1 的版本生命周期
+```
+
+兼容性：v1 内新增可选字段属兼容性变更，Client 忽略未知字段（任伟协议 §19），不需要升 API 版本。
+
+目标：引用卡片能一眼区分"厂内制度"与"法定要求"，并在制度已被新版替代时给出提示——这是 EHS 合规问答区别于通用文档问答的关键体验。
+
+---
+
+## 8. 阶段规划
+
+| 阶段 | 知识层 | 图谱层 |
+|---|---|---|
+| **MVP** | 企业统一知识库；解析 / 切分 / 向量 / rerank 全链路；`doc_class` 分层；文档版本生命周期 | 领域词典 + 别名表 + 双侧术语归一 |
+| **下一阶段** | 部门级隔离评估；增量更新与容量规划 | 完整图构建 + 一跳扩展，按 §4.5 门槛逐项开启 |
+| **后续** | 个人 / 部门知识空间；与 DCS 时序数据的联合引用 | 图谱可视化；企业自有对象（`OrgAsset`）关系网络的运营化 |
+
+---
+
+## 9. Failure Handling / Observability
 
 | 维度 | 约定 | 归属 |
 |---|---|---|
-| 失败处理 | doc_search 失败 → 内核 `RAG_UNAVAILABLE` 事件 + 结构化错误（yth152 已定义）；V1 远端知识工具失败 → 降级为仅私有文档回答并明示"行业知识暂不可用" | 本文档定义降级语义；机制归内核协议 |
-| 安全 | RAG 服务自身安全（pod 内 localhost、token、路径净化、解析资源限制）归任伟协议 §5；认证与用户体系在 service 层（见 §7.1）；本文档追加 §9 数据边界规则；远端知识服务 V1 必须加鉴权+HTTPS+限流后才可被产品调用 | 分层 |
-| 可观测 | 复用任伟协议 §15 日志字段；追加 `knowledge_source` 维度，使质量看板（姊妹篇）可分源统计 | 消费方 |
+| 检索失败 | `doc_search` 失败 → 内核 `RAG_UNAVAILABLE` 事件 + 结构化错误（yth152 已定义） | 机制归内核协议 |
+| 图谱失败 | 降级为 vector-only 并在响应 meta 标记，不整体失败（§3.4 降级红线） | 本文档定义语义 |
+| Rerank 失败 | fail-open 退化到向量分，meta 标记 `rerank_degraded`（任伟协议 §11） | 任伟协议 |
+| 空结果 | 检索无命中或全部低于分数阈值时，须返回明确的"无依据"信号而非低分结果，由内核决定话术。**产品原则：无证据不下结论** | 本文档定义语义，机制归内核 |
+| 可观测 | 复用任伟协议 §15 日志字段，追加 `doc_class`、`retrieval_channel` 两个维度，使质量看板可分层统计 | 消费方 |
 
-## 13. Versioning / Compatibility
+---
 
-- 本文档为架构决策记录（ADR 性质），变更走 PR + Reviewers 评审。
-- 对任伟协议的影响：仅建议新增两个可选 citation 字段（§10），不破坏 v1 兼容性。
-- 对内核协议的影响：V1 新增一个 Tool（`industrial_knowledge_search`），走 yth152 现有 tool 注册机制，无协议破坏。
-- 历史资产的服务器版本（:8011）在 V1 收敛 API 前保持原样，不承诺向后兼容实验期调用方。
+## 10. Acceptance Criteria（本文档的验收）
 
-## 14. Trade-offs / Alternatives
+1. Owner 确认知识归属（企业统一构建、逐客户独立、不做个人端侧）与部署形态表述。
+2. Reviewers 确认"单一知识库 + `doc_class` 分类维度"，不拆分为多服务。
+3. 任伟确认：§7 的 citation 可选字段与协议不冲突；§2.2 调用链与进程边界表述与协议一致。
+4. yth152 / 潘云泓确认：`doc_search` 为知识侧唯一工具，§9 的降级与空结果语义可接受。
+5. 张一确认：§4.2 图 Schema 首版的实体与关系类型与固废 / EHS 场景的实际问法对齐。
+6. 图谱能力的每一项都挂有启用门槛（§4.5），无"建了就上"的条目。
 
-| 决策 | 备选 | 取舍 |
-|---|---|---|
-| 双服务双工具（D1） | 单一"统一知识服务"内部分区 | 单服务看似简单，实则把数据主权、规模、算法三个维度的差异压进一个服务；安全评审（客户文档与公共知识同库）几乎不可过 |
-| MVP 不接远端知识 | MVP 就接入 | 早演示差异化，但引入平台级安全/SLA 风险，且质量证据不足（§8.1） |
-| 企业私服单形态（v2） | 保留桌面本地形态（v1 Profile A） | 桌面形态免服务器、可离线，但带来安装包膨胀（模型+引擎）、多客户端数据孤岛、IT 不可管控三类成本；私服形态与一期 pgvector 资产同构，复用成本最低 |
-| KG 不进 doc_search | doc_search 内部静默融合 KG | 静默融合让引用来源不可解释，违背"无证据不下结论"的产品原则 |
+---
 
-## 15. Acceptance Criteria（本文档的验收）
+## 11. Open Questions
 
-1. Owner 确认单部署形态（企业私服）表述与私有云方向一致。
-2. Reviewers 确认双知识源模型与 MVP/V1/V2 划分无异议。
-3. 任伟确认：citation 可选字段方案与 PR #3 协议不冲突；§7.1 调用链（桌面端经 service 转发）与协议修订一致。
-4. yth152/潘云泓确认：V1 `industrial_knowledge_search` Tool 挂载点与降级语义可接受。
-5. 复用矩阵中每个 legacy 资产都有明确去向（复用/暂缓/废弃），无"漂移资产"。
-6. KG 决策（§8.1）获得张一（领域 Skill）与潘云泓（内核）认可。
-
-## 16. Open Questions
-
-1. `docs/rag-sidecar-api`（任伟 PR #3）与 `docs/agent-kernel-interface-protocol` 的合入顺序——影响本文档被引用时的路径与字段命名基准。
-2. **字段命名统一**：内核侧 `doc_search` 出参（`docId/title/snippet/score`）与 RAG 服务 `/query` 响应（`chunk_id/document_id/text` 等）命名不一致；bakey 已在任伟 PR #3 review 中要求两边同步冻结，本文档不单方面定义映射，等待统一结论。
-3. 远端知识服务 V1 是否需要支持"知识包"离线分发（无外网企业）——影响 68.8M 的裁剪策略。
-4. 企业私服的多租户隔离粒度（库级/行级）留待 V1.1 设计。
-5. **PRD 联动修订**：RAG 上私服后，`MVP_PRD.md` 的"本地运行/本地数据"条款、模块 D（DCS 采集位置）、离线行为、安装包体积等需要 owner 统筹修订（§7.1 附带影响提示）。
-6. 服务器 legacy 代码（`d339aa3`，含密码待清理）是否作为参考实现贡献入 repo。
-
-## 17. Implementation Plan after Approval
-
-| 步骤 | 内容 | 前置 |
-|---|---|---|
-| 1 | citation 增加 `knowledge_source`/`knowledge_scope` 可选字段（随任伟协议实施） | 任伟 PR #3 合入 |
-| 2 | 服务器侧：清理 d339aa3 密码 → push feature 分支 → 按姊妹篇规范建回归基准 | 独立可先行 |
-| 3 | V1：`industrial_knowledge_search` Tool（内核注册 + /hybrid_search API 收敛 + 鉴权） | 步骤 2 + 内核 V1 排期 |
-| 4 | 质量看板分源统计（消费 `knowledge_source`） | 姊妹篇基准就绪 |
+1. **字段命名统一**：内核侧 `doc_search` 出参（`docId/title/snippet/score`）与 RAG 服务 `/query` 响应（`chunk_id/document_id/text`）命名不一致，两边需同步冻结；本文档不单方面定义映射。
+2. **基础领域词典的边界与责任**：产品预置到什么程度（危废名录、常引国标是否随交付），客户增补部分由谁在实施阶段维护。这直接决定图谱在新客户上线首日的可用性。
+3. `doc_class` 取值是否需要与张一的固废领域 Skill 体系、场景规范对齐，避免两套分类。
+4. **PRD 联动**：`MVP_PRD.md` 中"本地运行 / 本地数据存储 / 离线行为 / 安装包体积"等条款与私服形态的对齐，需 owner 统筹修订。
+5. 部门 / 个人级知识空间的真实客户诉求强度，决定其排期与是否需要在 MVP 的数据模型里预留字段。
