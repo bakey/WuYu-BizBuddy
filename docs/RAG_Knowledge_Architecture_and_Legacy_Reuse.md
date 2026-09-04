@@ -51,7 +51,7 @@ BizBuddy 部署在客户企业内网。产品交付的是**把企业自己的文
 
 | 项 | 约定 |
 |---|---|
-| 形态 | 私有云容器化：service + RAG 服务 + PostgreSQL 同 pod |
+| 形态 | 私有云容器化：service + RAG 服务同 pod，PostgreSQL 独立 pod |
 | 调用链 | 桌面端（Electron）不直连 RAG 服务，统一经 service 转发。RAG 服务只服务同 pod 的 service |
 | 进程边界 | 同 pod 内容器共享 network namespace，RAG 服务继续绑 loopback 并校验 `X-Sidecar-Token`（任伟协议 §5）即成立。**"同 pod"是该安全模型的显式前提**；若 RAG 拆为独立 Deployment，须改为服务间双向 TLS |
 | 元数据 | PostgreSQL |
