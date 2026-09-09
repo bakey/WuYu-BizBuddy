@@ -32,7 +32,7 @@ Electron 里有两层：页面和主程序。内核对外是 AgentKernel；DSH �
     │         ▼
     │    上传/删除（可选）→ HTTP → C（文档服务）
     ▼
- start / prompt / abort / listSessions / loadSession / shutdown / onExit
+ start / prompt / abort / listSessions / loadSession / deleteSession / shutdown / onExit
     ▼
  AgentKernel
     └ DSH
@@ -132,7 +132,7 @@ Electron 里有两层：页面和主程序。内核对外是 AgentKernel；DSH �
 对话历史（员工侧栏，数据在 B 的会话库）：
 
 - `bizbuddy:list-sessions`：列出本地会话（编号、问题摘要、更新时间）。
-- `bizbuddy:load-session`：打开一条，带回该 `sessionId` 下已有问答，窗口画出历史气泡后可继续 `prompt`。
+- `bizbuddy:load-session`：打开一条，带回该 `sessionId` 下已有问答（含助手消息上的引用）。窗口画出历史气泡和引用卡后可继续 `prompt`。点卡仍只按 `documentId` 跳数据库。
 - `bizbuddy:delete-session`：删一条历史。
 
 断网时可列出、打开、浏览历史，不能新问（黄条）。主程序把上述通道转到 AgentKernel 的 `listSessions` / `loadSession` / `deleteSession`（内核设计已有；接口确认清单未改写此项，按内核设计接线）。
@@ -169,6 +169,15 @@ type SessionMessage = {
   text: string
   requestId?: string
   createdAt: number
+  citations?: Array<{
+    citationId: string
+    documentId: string
+    documentName: string
+    page?: number
+    chunkId?: string
+    content: string
+    score?: number
+  }>
 }
 
 type KernelExitEvent = {
@@ -183,7 +192,7 @@ type KernelExitEvent = {
 | `start(config)` | 拉起 DSH 并注入配置（见第 2 节）。Promise 成功后才允许提问。 |
 | `prompt(sessionId, text, requestId)` | 提问。第三参必填，由 A 传入页面生成的编号。B 不生成编号。同一 `sessionId` 尚未结束再问，B 拒绝；主程序映射为 `SESSION_BUSY`。同一编号的后续提问由 B 带上该会话已有上下文。 |
 | `abort(requestId)` | 中断该问。进行中则停本轮并推 `error` / `USER_ABORTED`；已结束则成功返回、不推事件。不是 `shutdown`。 |
-| `listSessions` / `loadSession` / `deleteSession` | 对话历史。列表含问题摘要与更新时间；打开后页面画出已有气泡，可继续问。 |
+| `listSessions` / `loadSession` / `deleteSession` | 对话历史。列表含问题摘要与更新时间；打开后画出已有气泡和引用卡，可继续问。 |
 | `listTraces` / `readTrace` | 读轨迹，给管理端。字段见 4.2。 |
 | `shutdown` | 主动关闭 DSH。随后 `onExit` 的 `expected` 为 true。 |
 | `onExit` | 生命周期通知。返回取消订阅函数。`expected: false` 时主程序只自动救一轮。 |
@@ -218,7 +227,7 @@ type KernelExitEvent = {
 
 每段事件都带：`requestId`、`sessionId`、`seq`（该次请求内从 1 递增）。主程序原样转给页面，不改 `type`。页面按序号排序后展示。
 
-正式合同五种类型。思考过程是否另开 `plan` 事件，待与 B 书面确认；确认前窗口只按下述五种展示：
+正式合同五种类型。思考 / 计划如何下发由 B 设计（见给 B 的思考过程说明）；设计落地前窗口只按下述五种展示：
 
 **正在检索 `searching`**
 
@@ -379,7 +388,7 @@ type TraceEvent = {
 }
 ```
 
-管理端轨迹列表按 PRD 6.6 展示：时间（`createdAt`）、问题（`question`，该会话首条用户输入摘要）、状态（`status`）、引用数（`citationCount`）、耗时（`durationMs`）。
+管理端轨迹列表按 PRD 6.6 展示：时间（`createdAt`）、问题（`question`，该会话首条用户输入摘要）、状态（`status`）、引用数（`citationCount`，该条轨迹中引用条目个数，按 `citations` 数组元素合计）、耗时（`durationMs`）。
 
 `TraceEvent.type` 至少覆盖：用户输入、模型请求、模型输出、工具调用、工具结果、错误、本轮结束；详情展开含计划步骤、工具入参出参与耗时、引用、token。
 token 三个字段为可选，取决于模型是否返回 usage。主程序原样转给管理端，不在三页上画这些字段。
@@ -422,7 +431,7 @@ token 三个字段为可选，取决于模型是否返回 usage。主程序原�
 
 点引用卡：跳到数据库并高亮该 `documentId`。
 点侧栏「新对话」：聊天清空，换新的 `sessionId`；此前会话留在历史列表。
-点历史某一条：`load-session` 画出该段已有问答，沿用其 `sessionId` 继续问。
+点历史某一条：`load-session` 画出该段已有问答和引用卡，沿用其 `sessionId` 继续问。
 结束时既没有正文也没有引用：提示「未检索到可用内容」。
 文档服务不可用：`RAG_UNAVAILABLE`，提示文档服务不可用。
 
@@ -508,7 +517,7 @@ token 三个字段为可选，取决于模型是否返回 usage。主程序原�
 ## 8. 验收
 
 1. 未配置时进入引导；测通后进入三页；页面回包中看不到密钥。
-2. 提问能看到检索提示、逐字、引用卡、结束；本轮未结束时同一会话再问为 `SESSION_BUSY`；中断后收到 `USER_ABORTED`，可再问。侧栏能列出历史、打开后继续问；断网可浏览历史、不能发送。
+2. 提问能看到检索提示、逐字、引用卡、结束；本轮未结束时同一会话再问为 `SESSION_BUSY`；中断后收到 `USER_ABORTED`，可再问。侧栏能列出历史、打开后继续问（含引用卡）；断网可浏览历史、不能发送。
 3. 点引用跳到数据库并高亮对应文档编号。
 4. 空文件、不支持的类型立即失败。
 5. 提问走 `prompt(sessionId, text, requestId)`，事件上的 `requestId` 与发出的相同，形状与第 3.3 节一致。
