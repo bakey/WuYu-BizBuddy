@@ -4,9 +4,9 @@
 
 ## 1. 模块目标
 
-员工在 Windows 上使用本桌面应用，完成：安装打开、第一次配模型、提问、看一段段出来的回答和引用、点引用找到对应文件、在数据库页上传或删除文件。安装包装成的应用启动时检查是否有新版本。
+员工在本机使用桌面应用，完成：安装打开、第一次配模型、提问与查看历史对话、看一段段出来的回答和引用、点引用找到对应文件、在数据库页上传或删除文件。已安装的应用启动时检查是否有新版本。
 
-主程序（Electron 主进程）负责：只开一个窗口、把 API Key 加密存在本机、测模型能否连上、导入并调用 B 模块的 AgentKernel、把问答过程转给页面、把员工选的文件交给文档服务、问答服务异常退出后按约定救一轮、关掉应用时结束后台、打 Windows 安装包与更新检查。
+主程序（Electron 主进程）负责：只开一个窗口、把 API Key 加密存在本机、测模型能否连上、导入并调用 B 模块的 AgentKernel、把问答过程转给页面、读写对话历史、把员工选的文件交给文档服务、问答服务异常退出后按约定救一轮、关掉应用时结束后台、打 Windows 与 macOS 安装包并做更新检查。
 
 本模块经手四类数据：
 
@@ -21,7 +21,7 @@
 
 Electron 里有两层：页面和主程序。内核对外是 AgentKernel；DSH 是 B 内部的子进程。页面和主程序都不直接连 DSH，也不再单独启动一个 B.exe。
 
-提问与上传并列：员工可以直接提问，不必先上传。配好模型后 `start` 一次；之后每问一次只走 `prompt`。
+提问与上传并列：员工可以直接提问，不必先上传。配好模型后 `start` 一次（见下文「为何先 start」）；之后每问一次只走 `prompt`。同一 `sessionId` 的多轮由 B 记在会话库，员工可从历史里打开继续问。
 
 ```
 页面：新对话 | 能力 | 数据库
@@ -32,7 +32,7 @@ Electron 里有两层：页面和主程序。内核对外是 AgentKernel；DSH �
     │         ▼
     │    上传/删除（可选）→ HTTP → C（文档服务）
     ▼
- start / prompt / abort / shutdown / onExit
+ start / prompt / abort / listSessions / loadSession / shutdown / onExit
     ▼
  AgentKernel
     └ DSH
@@ -48,12 +48,14 @@ Electron 里有两层：页面和主程序。内核对外是 AgentKernel；DSH �
 - DSH 的启动、环境变量、通信、关闭由 B 负责。
 - 安装包把 DSH 运行文件、`cordis.yml`、Skills 放在 `resources/agent-kernel`，可执行文件保持解包（见第 7 节）。
 
+**为何先 `start` 一次：** `prompt` 只负责「这一问」。DSH、技能目录、会话库、模型地址是进程级资源，不能每问拉起一次。`start(config)` 做且只做这些：把 `KernelLaunchConfig` 交给 B；B 按 `configPath` 加载 DSH 配置，以 Node 模式拉起 DSH；注入模型、`skillsDir`、会话库路径、文档服务与采集地址。Promise 成功返回即就绪，可以提问。没有 `kernel_ready` 事件。之后每一问只调 `prompt`。员工改模型或密钥：先 `shutdown` 再 `start` 新配置。关掉应用：`shutdown`，由 B 关掉 DSH。
+
 目标生命周期：
 
-1. 已经配好模型 → 主程序调用 `start(config)`。
-2. `start()` 成功返回后才允许提问。没有 `kernel_ready` 事件。
+1. 已经配好模型 → 主程序调用 `start(config)`，完成上述拉起与注入。
+2. `start()` 成功返回后才允许提问。
 3. 主程序订阅 `onExit`。只对异常退出自动重启：`expected` 为 `false` 时，收到 `KERNEL_EXITED` 后执行一次 `shutdown` 再 `start`；再次失败则停止，页面黄条：「Agent 服务不可用，请重试或重启应用」。`expected` 为 `true`（主动 `shutdown`，例如改模型或退出应用）时不自动再拉。
-4. 员工关掉应用 → 主程序调用 `shutdown`，由 B 关掉 DSH。
+4. 员工关掉应用 → 主程序调用 `shutdown`。
 
 ---
 
@@ -69,7 +71,7 @@ Electron 里有两层：页面和主程序。内核对外是 AgentKernel；DSH �
 员工点发送时，页面调用通道 `bizbuddy:prompt`。带上三个字段：
 
 - `requestId`（本轮提问编号）：由页面生成（建议 UUID）。主程序原样传给 B，B 不重新生成。
-- `sessionId`（会话编号）：这一段多轮对话共用；点侧栏「新对话」会换新的。
+- `sessionId`（会话编号）：这一段多轮对话共用。点侧栏「新对话」换新编号；点历史某一条则沿用该编号继续问。
 - `text`：员工输入，去掉首尾空格后不能为空。
 
 ```
@@ -127,6 +129,14 @@ Electron 里有两层：页面和主程序。内核对外是 AgentKernel；DSH �
 
 本轮尚未结束时，页面可调用 `bizbuddy:abort`，带上这一问的 `requestId`、`sessionId`。主程序立刻回 `accepted: true`，再调 `abort(requestId)`。控件对齐原型。
 
+对话历史（员工侧栏，数据在 B 的会话库）：
+
+- `bizbuddy:list-sessions`：列出本地会话（编号、问题摘要、更新时间）。
+- `bizbuddy:load-session`：打开一条，带回该 `sessionId` 下已有问答，窗口画出历史气泡后可继续 `prompt`。
+- `bizbuddy:delete-session`：删一条历史。
+
+断网时可列出、打开、浏览历史，不能新问（黄条）。主程序把上述通道转到 AgentKernel 的 `listSessions` / `loadSession` / `deleteSession`（内核设计已有；接口确认清单未改写此项，按内核设计接线）。
+
 轨迹给管理端用，员工三页不点。通道保留：`bizbuddy:list-traces`、`bizbuddy:read-trace`。主程序再去调 AgentKernel 上对应方法。
 
 ### 3.2 主程序 → AgentKernel
@@ -138,10 +148,27 @@ interface AgentKernel {
   start(config: KernelLaunchConfig): Promise<void>
   prompt(sessionId: string, text: string, requestId: string): AsyncIterable<BizBuddyEvent>
   abort(requestId: string): Promise<void>
+  listSessions(): Promise<SessionSummary[]>
+  loadSession(sessionId: string): Promise<SessionMessage[]>
+  deleteSession(sessionId: string): Promise<void>
   listTraces(): Promise<TraceSummary[]>
   readTrace(sessionId: string, fromSeq?: number): Promise<TraceEvent[]>
   shutdown(): Promise<void>
   onExit(listener: (event: KernelExitEvent) => void): () => void
+}
+
+type SessionSummary = {
+  sessionId: string
+  question: string
+  updatedAt: number
+  messageCount: number
+}
+
+type SessionMessage = {
+  role: 'user' | 'assistant'
+  text: string
+  requestId?: string
+  createdAt: number
 }
 
 type KernelExitEvent = {
@@ -153,9 +180,10 @@ type KernelExitEvent = {
 
 | 方法 | 含义 |
 |---|---|
-| `start(config)` | 按配置启动。Promise 成功返回后才允许提问。 |
-| `prompt(sessionId, text, requestId)` | 提问。第三参必填，由 A 传入页面生成的编号。B 不生成编号。同一 `sessionId` 尚未结束再问，B 拒绝；主程序映射为 `SESSION_BUSY`。 |
+| `start(config)` | 拉起 DSH 并注入配置（见第 2 节）。Promise 成功后才允许提问。 |
+| `prompt(sessionId, text, requestId)` | 提问。第三参必填，由 A 传入页面生成的编号。B 不生成编号。同一 `sessionId` 尚未结束再问，B 拒绝；主程序映射为 `SESSION_BUSY`。同一编号的后续提问由 B 带上该会话已有上下文。 |
 | `abort(requestId)` | 中断该问。进行中则停本轮并推 `error` / `USER_ABORTED`；已结束则成功返回、不推事件。不是 `shutdown`。 |
+| `listSessions` / `loadSession` / `deleteSession` | 对话历史。列表含问题摘要与更新时间；打开后页面画出已有气泡，可继续问。 |
 | `listTraces` / `readTrace` | 读轨迹，给管理端。字段见 4.2。 |
 | `shutdown` | 主动关闭 DSH。随后 `onExit` 的 `expected` 为 true。 |
 | `onExit` | 生命周期通知。返回取消订阅函数。`expected: false` 时主程序只自动救一轮。 |
@@ -178,10 +206,10 @@ type KernelExitEvent = {
 
 原协议中的 `BIZBUDDY_MODEL_NAME` 统一为 `BIZBUDDY_MODEL_ID`，`BIZBUDDY_DATA_DIR` 统一为 `BIZBUDDY_SESSION_DB`。这两项环境变量不经过页面 IPC。
 
-Windows 加载与打包：
+加载与打包：
 
-- 主程序：`import { … } from '@wuyu/bizbuddy-agent-kernel'`，然后 `start` / `prompt` / `abort` / `onExit` / `shutdown`。
-- 安装包将 DSH 运行文件、`cordis.yml`、Skills 放到 `resources/agent-kernel`，并保持可执行文件解包。
+- 主程序：`import { … } from '@wuyu/bizbuddy-agent-kernel'`，然后 `start` / `prompt` / `abort` / `listSessions` / `loadSession` / `onExit` / `shutdown`。
+- Windows 与 macOS 安装包均将 DSH 运行文件、`cordis.yml`、Skills 放到 `resources/agent-kernel`，并保持可执行文件解包。
 - `configPath`、`skillsDir` 指向该目录内的文件与 Skills 文件夹。
 
 `onExit` 与 `prompt` 第三参必填已写入接口确认清单，主程序按此调用。
@@ -190,11 +218,11 @@ Windows 加载与打包：
 
 每段事件都带：`requestId`、`sessionId`、`seq`（该次请求内从 1 递增）。主程序原样转给页面，不改 `type`。页面按序号排序后展示。
 
-正式合同五种类型：
+正式合同五种类型。思考过程是否另开 `plan` 事件，待与 B 书面确认；确认前窗口只按下述五种展示：
 
 **正在检索 `searching`**
 
-窗口显示 `message`，例如「正在检索相关制度」。不把 `tool` 名给员工看。`tool` 可以是 `doc_search`、`ts_list`、`ts_query`。
+窗口显示 `message`，例如「正在检索相关制度」，作为本轮步骤提示（可收起）。不把 `tool` 名给员工看。`tool` 可以是 `doc_search`、`ts_list`、`ts_query`。
 
 ```
 {
@@ -324,7 +352,9 @@ type TraceSummary = {
   sessionId: string
   createdAt: number
   updatedAt: number
+  question: string
   status: 'completed' | 'failed' | 'running'
+  citationCount: number
   eventCount: number
   durationMs: number
   inputTokens?: number
@@ -349,7 +379,9 @@ type TraceEvent = {
 }
 ```
 
-`TraceEvent.type` 至少覆盖：用户输入、模型请求、模型输出、工具调用、工具结果、错误、本轮结束。
+管理端轨迹列表按 PRD 6.6 展示：时间（`createdAt`）、问题（`question`，该会话首条用户输入摘要）、状态（`status`）、引用数（`citationCount`）、耗时（`durationMs`）。
+
+`TraceEvent.type` 至少覆盖：用户输入、模型请求、模型输出、工具调用、工具结果、错误、本轮结束；详情展开含计划步骤、工具入参出参与耗时、引用、token。
 token 三个字段为可选，取决于模型是否返回 usage。主程序原样转给管理端，不在三页上画这些字段。
 
 ### 4.3 配置
@@ -380,7 +412,7 @@ token 三个字段为可选，取决于模型是否返回 usage。主程序原�
 | 顺序 | 员工看见 | 对应什么 |
 |---|---|---|
 | 1 | 自己的问气泡出现 | 提问已被接收 `accepted: true` |
-| 2 | 「正在检索相关制度」或查监测的提示 | `searching` |
+| 2 | 「正在检索相关制度」或查监测的提示（可收起） | `searching` |
 | 3 | 答案一段段变长 | `text_delta` |
 | 4 | 引用卡，标题是文档名 | `citation` |
 | 5 | 本轮结束，可再问 | `done` |
@@ -389,7 +421,8 @@ token 三个字段为可选，取决于模型是否返回 usage。主程序原�
 本轮结束 = `done` 或任意 `error`（含用户中断）。中断走 `bizbuddy:abort` → `abort(requestId)` → `error` / `USER_ABORTED`。半截文字和已出引用保留。
 
 点引用卡：跳到数据库并高亮该 `documentId`。
-再点侧栏「新对话」：聊天清空，换新的 `sessionId`。
+点侧栏「新对话」：聊天清空，换新的 `sessionId`；此前会话留在历史列表。
+点历史某一条：`load-session` 画出该段已有问答，沿用其 `sessionId` 继续问。
 结束时既没有正文也没有引用：提示「未检索到可用内容」。
 文档服务不可用：`RAG_UNAVAILABLE`，提示文档服务不可用。
 
@@ -402,38 +435,45 @@ token 三个字段为可选，取决于模型是否返回 usage。主程序原�
 
 **引导：** 还没配模型时全屏这一页，没有左侧三页。填模型地址、模型名、密钥，测试连接通过才能进入三页。以后改配置点侧栏「模型设置」，密钥可以不重填。
 
-**新对话：** 欢迎区与生成中控件对齐原型。改模型或救一轮期间不可提问。
+**新对话：** 欢迎区与生成中控件对齐原型。侧栏列出对话历史（问题摘要、时间）；点一条打开继续问，点「新对话」另开一段。改模型或救一轮期间不可提问。断网可浏览历史，不能发送。
 
 **能力：** 一张「安全环保合规专家」。点示例等于到新对话自动发送。
 
 **数据库：** 每一行有编号、文件名、状态。状态对人显示为：解析中、已入知识库、失败及原因。空文件、不支持的类型立刻失败。文档服务未接上时，合法文件会先解析中，再显示「失败：文档服务未连接」。接上之后，主程序按 3.4 把文件交给文档服务，并询问进度。员工提问时去知识库里搜的仍是内核的 `doc_search`。
 
-**断网：** 对话上方黄条，发不出去；数据库仍可上传、删除。
+**断网：** 对话上方黄条，发不出去；仍可浏览历史对话；数据库仍可上传、删除。
 
 **管理后台：** 按管理端设计是内网网页。桌面若提供入口，则打开浏览器。三页里没有管理导航。管理员接 DCS 在网页完成；员工提问时内核自动查询已接入点位。轨迹由管理端经主程序读 4.2 的接口。
 
-**安装包：** 交付 Windows x64 安装包（NSIS）。员工按常规方式安装；可改安装目录；桌面与开始菜单有「无隅 BizBuddy」。再开只聚焦已有窗口。
+**安装包：** 同一套主程序，分别打 Windows 与 macOS 包。再开只聚焦已有窗口。
+
+| 平台 | 形态 | 员工侧 |
+|---|---|---|
+| Windows | x64 安装包（NSIS） | 可改安装目录；桌面与开始菜单有「无隅 BizBuddy」 |
+| macOS | Apple 芯片与 Intel 的磁盘映像（dmg）；架构不足时允许分打两包 | 拖入「应用程序」；程序坞与启动台可打开 |
+
+两端安装目录内均含第 7 节的 `resources/agent-kernel`（DSH、`cordis.yml`、Skills，可执行文件解包）。页面、IPC、与内核的协议两端相同。
 
 **自动更新：** 只规定员工怎么碰到升级，不把发布地址写进设计。
 
 - 谁检查：仅已安装的应用，启动时主程序在后台检查。开发启动不检查。
 - 三页没有「检查更新」按钮，也没有更新专用的 IPC JSON。
-- 清单格式：electron-updater 的 `latest.yml`。传输用 HTTPS。
-- 地址：由发布配置注入。未配置、无新版本、检查失败：不弹窗，照常进三页。
+- 清单：Windows 用 `latest.yml`，macOS 用 `latest-mac.yml`。传输用 HTTPS。
+- 地址：由发布配置注入（可按平台各一条）。未配置、无新版本、检查失败：不弹窗，照常进三页。
 - 有更高版本：系统对话框提示版本号，可选稍后或下载；下完后提示将在退出时安装。不强制升级。
 
 改发布地址只改配置，不改三页、不改与内核的协议。
 
-**代码签名：** 有公司代码签名证书时写入安装包；无证书时仍可出包，属性中无数字签名，系统可能提示未知发布者。
+**代码签名：** Windows 有公司代码签名证书时写入安装包，无证书仍可出包（系统可能提示未知发布者）。macOS 有 Apple 开发者证书时对应用与 dmg 签名并公证；无证书仍可出包，员工打开时可能需在系统设置中允许。
 
 ---
 
 ## 7. 目录结构
 
-设计落点：
+设计落点（Windows 安装目录与 macOS「应用程序」包内结构相同）：
 
 ```
-Windows 安装目录
+安装目录或 App 包
 ├── 主程序（Electron Main）
 ├── 页面（Vue 三页）
 └── resources/agent-kernel/          ← 可执行文件保持解包
@@ -441,9 +481,9 @@ Windows 安装目录
     ├── cordis.yml                   ← start(config).configPath
     └── Skills/                      ← start(config).skillsDir
 
-用户数据目录
+用户数据目录（Windows 与 macOS 各用系统约定目录，逻辑相同）
 ├── workspace/                       ← workspaceDir，DSH 工作目录
-├── data/                            ← dataDir，其下 sessions.sqlite
+├── data/                            ← dataDir，其下 sessions.sqlite（对话历史与轨迹）
 └── 模型配置（主程序 safeStorage，页面拿不到 Key）
 ```
 
@@ -455,13 +495,13 @@ Windows 安装目录
 ## 8. 验收
 
 1. 未配置时进入引导；测通后进入三页；页面回包中看不到密钥。
-2. 提问能看到检索提示、逐字、引用卡、结束；本轮未结束时同一会话再问为 `SESSION_BUSY`；中断后收到 `USER_ABORTED`，可再问。
+2. 提问能看到检索提示、逐字、引用卡、结束；本轮未结束时同一会话再问为 `SESSION_BUSY`；中断后收到 `USER_ABORTED`，可再问。侧栏能列出历史、打开后继续问；断网可浏览历史、不能发送。
 3. 点引用跳到数据库并高亮对应文档编号。
 4. 空文件、不支持的类型立即失败。
 5. 提问走 `prompt(sessionId, text, requestId)`，事件上的 `requestId` 与发出的相同，形状与第 3.3 节一致。
 6. 上传至「已入知识库」后提问，引用指向该文档编号。C 不可用时提问得到 `RAG_UNAVAILABLE`，不是 mock 答案。
-7. 管理端能通过主程序读取第 4.2 节形状的轨迹；员工三页不展示轨迹。
-8. Windows 安装包可安装打开；`resources/agent-kernel` 内 DSH / `cordis.yml` / Skills 可被 `start` 找到；无证书时允许未签名。已安装应用在已配置更新地址时可检查新版本；未配置或失败不弹窗、不打断使用。
+7. 管理端能通过主程序读取第 4.2 节形状的轨迹（列表含时间、问题、状态、引用数、耗时）；员工三页不展示轨迹。
+8. Windows NSIS 与 macOS dmg 均可安装打开；包内 `resources/agent-kernel` 可被 `start` 找到；无证书时允许未签名。已安装应用在已配置更新地址时可检查新版本；未配置或失败不弹窗、不打断使用。
 9. 流程 1：文件至「已入知识库」后提问，引用指向该文档编号。
 10. 流程 2：提问可出现查监测提示与综合正文；文档引用仍可点；点位卡等 `timeseries_result` 下发后再验。
 11. 异常退出只自动 `shutdown`+`start` 一次；再失败黄条「Agent 服务不可用，请重试或重启应用」。改模型期间发不出新问题。
