@@ -209,7 +209,7 @@ type KernelExitEvent = {
 加载与打包：
 
 - 主程序：`import { … } from '@wuyu/bizbuddy-agent-kernel'`，然后 `start` / `prompt` / `abort` / `listSessions` / `loadSession` / `onExit` / `shutdown`。
-- Windows 与 macOS 安装包均将 DSH 运行文件、`cordis.yml`、Skills 放到 `resources/agent-kernel`，并保持可执行文件解包。
+- Windows 与 macOS 安装包均将 DSH 运行文件、`cordis.yml`、Skills 放到 `resources/agent-kernel`，可执行文件保持解包，且 DSH 架构与该包一致（见第 6、7 节）。
 - `configPath`、`skillsDir` 指向该目录内的文件与 Skills 文件夹。
 
 `onExit` 与 `prompt` 第三参必填已写入接口确认清单，主程序按此调用。
@@ -445,50 +445,63 @@ token 三个字段为可选，取决于模型是否返回 usage。主程序原�
 
 **管理后台：** 按管理端设计是内网网页。桌面若提供入口，则打开浏览器。三页里没有管理导航。管理员接 DCS 在网页完成；员工提问时内核自动查询已接入点位。轨迹由管理端经主程序读 4.2 的接口。
 
-**安装包：** 同一套主程序，分别打 Windows 与 macOS 包。再开只聚焦已有窗口。
+**安装包：** 同一套主程序、同一套 IPC 与内核接法，按平台分别出包。不为 Mac 另开业务分支。实现顺序可以先打 Windows，Mac 按本节直接打，不再改目录、协议或更新形态。再开只聚焦已有窗口。
 
-| 平台 | 形态 | 员工侧 |
-|---|---|---|
-| Windows | x64 安装包（NSIS） | 可改安装目录；桌面与开始菜单有「无隅 BizBuddy」 |
-| macOS | Apple 芯片与 Intel 的磁盘映像（dmg）；架构不足时允许分打两包 | 拖入「应用程序」；程序坞与启动台可打开 |
+系统范围：Windows 10 / 11（64 位）；macOS 12 及以上（Apple 芯片与 Intel）。
 
-两端安装目录内均含第 7 节的 `resources/agent-kernel`（DSH、`cordis.yml`、Skills，可执行文件解包）。页面、IPC、与内核的协议两端相同。
+| 平台 | 包形态 | 架构 | 员工怎么装 |
+|---|---|---|---|
+| Windows | NSIS 安装程序（`.exe`） | 仅 x64，一份 | 可改安装目录；桌面与开始菜单有「无隅 BizBuddy」；卸载走系统「应用和功能」 |
+| macOS | 磁盘映像（`.dmg`） | **分架构各一份**：Apple 芯片（arm64）、Intel（x64）。文件名带架构，不打混合包 | 拖入「应用程序」；程序坞与启动台可打开。卸载：把应用拖进废纸篓。用户数据不随卸载自动删除 |
+
+两端包内均含第 7 节 `resources/agent-kernel`。其中 DSH 与壳拉起的 C/D 可执行文件必须与该包架构一致（Windows x64、macOS arm64、macOS x64 各备一份），`cordis.yml` 与 Skills 文本两端共用。页面、IPC、与内核的协议两端相同。
+
+体积目标：单包不超过 500MB（与 PRD 一致）。
 
 **自动更新：** 只规定员工怎么碰到升级，不把发布地址写进设计。
 
 - 谁检查：仅已安装的应用，启动时主程序在后台检查。开发启动不检查。
 - 三页没有「检查更新」按钮，也没有更新专用的 IPC JSON。
-- 清单：Windows 用 `latest.yml`，macOS 用 `latest-mac.yml`。传输用 HTTPS。
-- 地址：由发布配置注入（可按平台各一条）。未配置、无新版本、检查失败：不弹窗，照常进三页。
+- 清单：Windows 用 `latest.yml`；macOS Apple 芯片与 Intel 各用对应的 `latest-mac.yml`（或带架构后缀的清单），只升级到同一架构。传输用 HTTPS。
+- 地址：由发布配置注入（可按平台、架构各一条）。未配置、无新版本、检查失败：不弹窗，照常进三页。
 - 有更高版本：系统对话框提示版本号，可选稍后或下载；下完后提示将在退出时安装。不强制升级。
 
 改发布地址只改配置，不改三页、不改与内核的协议。
 
-**代码签名：** Windows 有公司代码签名证书时写入安装包，无证书仍可出包（系统可能提示未知发布者）。macOS 有 Apple 开发者证书时对应用与 dmg 签名并公证；无证书仍可出包，员工打开时可能需在系统设置中允许。
+**代码签名：** Windows 有公司代码签名证书时写入安装包，无证书仍可出包（系统可能提示未知发布者）。macOS 有 Apple 开发者证书时对应用与 dmg 签名并公证；无证书仍可出包，员工打开时可能需在系统设置中允许。签名有无只影响系统提示，不改变包内目录与协议。
 
 ---
 
 ## 7. 目录结构
 
-设计落点（Windows 安装目录与 macOS「应用程序」包内结构相同）：
+设计落点（Windows 安装目录与 macOS `.app` 包内结构相同；DSH 等可执行文件按该包架构放置，不混放）：
 
 ```
-安装目录或 App 包
+安装目录（Windows）或 无隅 BizBuddy.app/Contents（macOS）
 ├── 主程序（Electron Main）
 ├── 页面（Vue 三页）
-└── resources/agent-kernel/          ← 可执行文件保持解包
-    ├── DSH 运行文件
+└── resources/agent-kernel/          ← 可执行文件保持解包，架构与本包一致
+    ├── DSH 运行文件                 ← win-x64 / darwin-arm64 / darwin-x64 三选一
     ├── cordis.yml                   ← start(config).configPath
     └── Skills/                      ← start(config).skillsDir
 
-用户数据目录（Windows 与 macOS 各用系统约定目录，逻辑相同）
+用户数据目录（逻辑相同，路径按系统）
 ├── workspace/                       ← workspaceDir，DSH 工作目录
 ├── data/                            ← dataDir，其下 sessions.sqlite（对话历史与轨迹）
 └── 模型配置（主程序 safeStorage，页面拿不到 Key）
 ```
 
+用户数据路径（主程序用系统用户数据目录，不写死盘符）：
+
+| 平台 | 目录 |
+|---|---|
+| Windows | `%APPDATA%\无隅 BizBuddy` |
+| macOS | `~/Library/Application Support/无隅 BizBuddy` |
+
+密钥：Windows 走 DPAPI，macOS 走钥匙串，均经 safeStorage，页面拿不到 Key。
+
 主程序依赖 npm 包 `@wuyu/bizbuddy-agent-kernel`。
-文档服务 C、采集 D 由壳按任务拆解拉起本机可执行文件，只把 `ragBaseUrl` / `collectorBaseUrl` 传给 B。
+文档服务 C、采集 D 由壳按任务拆解拉起本机可执行文件（与安装包同一架构），只把 `ragBaseUrl` / `collectorBaseUrl` 传给 B。
 
 ---
 
@@ -501,7 +514,7 @@ token 三个字段为可选，取决于模型是否返回 usage。主程序原�
 5. 提问走 `prompt(sessionId, text, requestId)`，事件上的 `requestId` 与发出的相同，形状与第 3.3 节一致。
 6. 上传至「已入知识库」后提问，引用指向该文档编号。C 不可用时提问得到 `RAG_UNAVAILABLE`，不是 mock 答案。
 7. 管理端能通过主程序读取第 4.2 节形状的轨迹（列表含时间、问题、状态、引用数、耗时）；员工三页不展示轨迹。
-8. Windows NSIS 与 macOS dmg 均可安装打开；包内 `resources/agent-kernel` 可被 `start` 找到；无证书时允许未签名。已安装应用在已配置更新地址时可检查新版本；未配置或失败不弹窗、不打断使用。
+8. 安装包：Windows x64 NSIS 能安装打开；macOS 按本节打 arm64、x64 两份 dmg，包内 `resources/agent-kernel` 架构与本包一致、可被 `start` 找到。无证书时允许未签名。已安装应用在已配置更新地址时可检查新版本（只升同一架构）；未配置或失败不弹窗、不打断使用。实现顺序允许先交 Windows 包，Mac 包不改本节规定。
 9. 流程 1：文件至「已入知识库」后提问，引用指向该文档编号。
 10. 流程 2：提问可出现查监测提示与综合正文；文档引用仍可点；点位卡等 `timeseries_result` 下发后再验。
 11. 异常退出只自动 `shutdown`+`start` 一次；再失败黄条「Agent 服务不可用，请重试或重启应用」。改模型期间发不出新问题。
